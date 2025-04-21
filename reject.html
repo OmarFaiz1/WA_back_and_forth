@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <title>Order Rejected</title>
+  </head>
+  <body class="bg-red-50 flex items-center justify-center min-h-screen">
+    <div class="bg-white p-8 rounded-2xl shadow-xl max-w-md text-center">
+      <h1 class="text-3xl font-bold text-red-700 mb-4">😔 Oh no!</h1>
+      <p class="text-gray-700 mb-6">
+        Your order
+        <span id="orderRef" class="font-mono text-indigo-600"></span> has been
+        <span class="font-semibold text-red-600">rejected</span>.
+      </p>
+      <p class="text-sm text-gray-500">
+        If this was a mistake, please reach out to our support.
+      </p>
+    </div>
+
+    <script>
+      const orderRef = window.location.pathname.split("/").pop();
+      document.getElementById("orderRef").textContent = orderRef;
+    </script>
+  </body>
+</html>

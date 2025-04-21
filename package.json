@@ -1,0 +1,30 @@
+{
+  "name": "eid-greetings-whatsapp",
+  "version": "1.0.0",
+  "description": "Send Eid Mubarak greetings to all your WhatsApp contacts",
+  "main": "eid-greetings.js",
+  "scripts": {
+    "start": "node eid-greetings.js",
+    "list-only": "node eid-greetings.js --list-only",
+    "dry-run": "node eid-greetings.js --dry-run"
+  },
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "eid",
+    "greetings",
+    "contacts"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.8.4",
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "mysql2": "^3.14.0",
+    "path": "^0.12.7",
+    "puppeteer": "^24.4.0",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.26.0"
+  }
+}
