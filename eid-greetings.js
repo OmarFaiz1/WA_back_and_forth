@@ -13,7 +13,7 @@
 require("dotenv").config();
 const path = require("path");
 // serve static HTML pages from project root
-apiApp.use(express.static(__dirname));
+
 const express = require("express");
 const mysql = require("mysql2/promise");
 const axios = require("axios");
@@ -22,7 +22,7 @@ const qrcode = require("qrcode-terminal");
 const apiApp = express();
 apiApp.use(express.json());
 const BASE_URL = process.env.APP_BASE_URL || "https://your-app.herokuapp.com";
-
+apiApp.use(express.static(__dirname));
 // -----------------------------------------------------------------------------
 // Configuration – load from .env or use defaults
 
