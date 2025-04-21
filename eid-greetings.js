@@ -105,7 +105,7 @@ async function initializeWhatsAppClient() {
 
     waClient.on("qr", (qr) => {
       console.log("Scan the QR code to authenticate WhatsApp:");
-      qrcode.generate(qr, { small: true });
+      qrcode.generate(qr, { small: false, margin: 2});
     });
 
     waClient.on("authenticated", () => {
