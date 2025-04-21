@@ -80,26 +80,49 @@ const pool = mysql.createPool(DB_CONFIG);
 let waClient = null;
 
 async function initializeWhatsAppClient() {
-  if (waClient) return;
-  console.log("Initializing WhatsApp client...");
-  waClient = new Client({
-    authStrategy: new LocalAuth({
-      clientId: "order-confirmation-sender",
-      dataPath: "./.wwebjs_auth", // ensure this folder is writable
-    }),
-    puppeteer: {
-      headless: process.env.HEADLESS_MODE !== "false",
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-accelerated-2d-canvas",
-        "--no-first-run",
-        "--disable-gpu",
-        "--disable-extensions",
-      ],
-    },
+  if (waClient) return; // already done
+
+  return new Promise((resolve, reject) => {
+    console.log("Initializing WhatsApp client...");
+    waClient = new Client({
+      authStrategy: new LocalAuth({
+        clientId: "order-confirmation-sender",
+        dataPath: "./.wwebjs_auth",
+      }),
+      puppeteer: {
+        headless: process.env.HEADLESS_MODE !== "false",
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-accelerated-2d-canvas",
+          "--no-first-run",
+          "--disable-gpu",
+          "--disable-extensions",
+        ],
+      },
+    });
+
+    waClient.on("qr", qr => {
+      console.log("Scan the QR code to authenticate WhatsApp:");
+      qrcode.generate(qr, { small: true });
+    });
+    waClient.on("authenticated", () => {
+      console.log("WhatsApp authenticated successfully.");
+    });
+    waClient.on("auth_failure", msg => {
+      console.error("WhatsApp auth failure:", msg);
+      reject(new Error("WhatsApp auth failure"));
+    });
+    waClient.on("ready", () => {
+      console.log("✅ WhatsApp client is ready.");
+      resolve();
+    });
+
+    waClient.initialize();
   });
+}
+
 
   waClient.on("qr", (qr) => {
     console.log("Scan the QR code to authenticate WhatsApp:");
@@ -498,13 +521,20 @@ apiApp.listen(PORT, () => {
 // Start main loops
 
 // Initialize WhatsApp client then start periodic tasks.
-initializeWhatsAppClient().then(() => {
-  // Check Shopify orders on a regular interval
-  setInterval(processNewShopifyOrders, POLL_INTERVAL);
+initializeWhatsAppClient()
+  .then(() => {
+    // do an initial fetch/send right away, if you like:
+    processNewShopifyOrders();
 
-  // Check for orders that need a resend of the confirmation message
-  setInterval(checkForResendMessages, RESEND_CHECK_INTERVAL);
-});
+    // then schedule the regular polls
+    setInterval(processNewShopifyOrders, POLL_INTERVAL);
+    setInterval(checkForResendMessages, RESEND_CHECK_INTERVAL);
+  })
+  .catch(err => {
+    console.error("Fatal: could not initialize WhatsApp client", err);
+    process.exit(1);
+  });
+
 
 // Handle graceful shutdown
 process.on("SIGINT", async () => {
