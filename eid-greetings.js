@@ -460,14 +460,19 @@ apiApp.get("/api/status", (req, res) => {
 apiApp.get("/confirm/:orderRef", async (req, res) => {
   const { orderRef } = req.params;
   console.log(`Order ${orderRef} confirmed via link`);
-  // fire off your existing API‐update function
   try {
+    // 1) update your external system
     await updateOrderStatusViaAPI(orderRef, "yes");
+    // 2) then also update your local MySQL table
+    await updateOrderStatusInDB(orderRef, "yes");
+    console.log(`Order ${orderRef} status set to 'yes' locally.`);
   } catch (e) {
-    console.error("Error updating via API:", e);
+    console.error("Error in confirm link flow:", e);
   }
+  // serve the confirmation page
   res.sendFile(path.join(__dirname, "confirm.html"));
 });
+
 
 // Rejection link
 apiApp.get("/reject/:orderRef", async (req, res) => {
