@@ -103,17 +103,20 @@ async function initializeWhatsAppClient() {
       },
     });
 
-    waClient.on("qr", qr => {
+    waClient.on("qr", (qr) => {
       console.log("Scan the QR code to authenticate WhatsApp:");
       qrcode.generate(qr, { small: true });
     });
+
     waClient.on("authenticated", () => {
       console.log("WhatsApp authenticated successfully.");
     });
-    waClient.on("auth_failure", msg => {
+
+    waClient.on("auth_failure", (msg) => {
       console.error("WhatsApp auth failure:", msg);
       reject(new Error("WhatsApp auth failure"));
     });
+
     waClient.on("ready", () => {
       console.log("✅ WhatsApp client is ready.");
       resolve();
@@ -122,6 +125,7 @@ async function initializeWhatsAppClient() {
     waClient.initialize();
   });
 }
+
 
 
   waClient.on("qr", (qr) => {
