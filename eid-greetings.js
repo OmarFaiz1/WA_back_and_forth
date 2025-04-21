@@ -19,7 +19,8 @@ const mysql = require("mysql2/promise");
 const axios = require("axios");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
-
+const apiApp = express();
+apiApp.use(express.json());
 const BASE_URL = process.env.APP_BASE_URL || "https://your-app.herokuapp.com";
 
 // -----------------------------------------------------------------------------
@@ -422,8 +423,7 @@ async function checkForResendMessages() {
 
 // -----------------------------------------------------------------------------
 // Express API Server
-const apiApp = express();
-apiApp.use(express.json());
+
 
 // Health-check endpoint
 apiApp.get("/api/status", (req, res) => {
