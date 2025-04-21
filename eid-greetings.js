@@ -124,7 +124,7 @@ async function initializeWhatsAppClient() {
 
     waClient.initialize();
   });
-}
+
 
 
 
