@@ -21,7 +21,7 @@ const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const apiApp = express();
 apiApp.use(express.json());
-const BASE_URL = process.env.APP_BASE_URL || "https://whatsappautomationwithbuttons-wert.onrender.com";
+const BASE_URL = "https://whatsappautomationwithbuttons-wert.onrender.com";
 apiApp.use(express.static(__dirname));
 // -----------------------------------------------------------------------------
 // Configuration – load from .env or use defaults
