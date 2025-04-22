@@ -26,7 +26,7 @@ apiApp.use(express.static(__dirname));
 // -----------------------------------------------------------------------------
 // Configuration – load from .env or use defaults
 
-const PORT = process.env.API_PORT || 3001;
+const PORT = process.env.API_PORT || 10000;
 const POLL_INTERVAL = process.env.POLL_INTERVAL || 60000; // check Shopify orders every 60 seconds
 const RESEND_CHECK_INTERVAL = process.env.RESEND_CHECK_INTERVAL || 3600000; // check every minute for demo (use 3600000 for hourly)
 const RESEND_HOURS_THRESHOLD = 4; // resend if 4 hours have passed
@@ -293,7 +293,7 @@ async function incrementLastMessageCounter(orderRefNumber) {
 // -----------------------------------------------------------------------------
 // Function to call the external REST API to update order status
 async function updateOrderStatusViaAPI(orderRefNumber, status) {
-  const apiBaseUrl = "https://testingorderportal.onrender.com/api";
+  const apiBaseUrl = "https://testingorderportal-kygk.onrender.com/api";
   const apiKey = process.env.API_KEY || "fastians";
   try {
     const response = await axios.post(
