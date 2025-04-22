@@ -71,58 +71,6 @@ ${rejectUrl}
 `;
 };
 
-// Status update message template
-const STATUS_UPDATE_MESSAGE_TEMPLATE = (order) => {
-  return `Dear ${order.customer_name}, your order ${order.order_ref_number} has been ${
-    order.status === "yes" ? "confirmed" : "rejected"
-  }.`;
-};
-
-// Delivery update message template
-const DELIVERY_UPDATE_MESSAGE_TEMPLATE = (order) => {
-  return `Dear ${order.customer_name}, the delivery time for your order ${order.order_ref_number} has been updated to ${order.delivery_time} days.`;
-};
-
-// Function to send status update message
-async function sendStatusUpdateMessage(order) {
-  try {
-    let phone = order.phone.trim();
-    phone = convertPhone(phone);
-    const waId = `${phone}@c.us`;
-    const messageText = STATUS_UPDATE_MESSAGE_TEMPLATE(order);
-    console.log(`Sending status update message to ${phone}...`);
-    const sentMessage = await waClient.sendMessage(waId, messageText);
-    if (sentMessage) {
-      console.log(`Status update message sent to ${phone}`);
-      return true;
-    }
-    return false;
-  } catch (error) {
-    console.error("Error sending status update message:", error.message);
-    return false;
-  }
-}
-
-// Function to send delivery update message
-async function sendDeliveryUpdateMessage(order) {
-  try {
-    let phone = order.phone.trim();
-    phone = convertPhone(phone);
-    const waId = `${phone}@c.us`;
-    const messageText = DELIVERY_UPDATE_MESSAGE_TEMPLATE(order);
-    console.log(`Sending delivery update message to ${phone}...`);
-    const sentMessage = await waClient.sendMessage(waId, messageText);
-    if (sentMessage) {
-      console.log(`Delivery update message sent to ${phone}`);
-      return true;
-    }
-    return false;
-  } catch (error) {
-    console.error("Error sending delivery update message:", error.message);
-    return false;
-  }
-}
-
 // -----------------------------------------------------------------------------
 // Initialize MySQL connection pool
 const pool = mysql.createPool(DB_CONFIG);
@@ -422,9 +370,9 @@ async function processNewShopifyOrders() {
             ? order.shipping_address.city
             : "Unknown",
           phone:
-  order.shipping_address && order.shipping_address.phone
-    ? convertPhone(order.shipping_address.phone.trim())
-    : "0000000000",
+            order.shipping_address && order.shipping_address.phone
+              ? order.shipping_address.phone
+              : "0000000000",
           amount: order.total_price,
           status: "no", // waiting confirmation
           delivery_time: 4,
@@ -550,9 +498,9 @@ apiApp.get("/api/sendMessage/:phone", async (req, res) => {
     connection = await pool.getConnection();
     // Find the latest order for this phone number (assuming there could be multiple orders).
     const [rows] = await connection.query(
-  "SELECT * FROM testingTrialAcc WHERE phone = ? ORDER BY order_ref_number DESC LIMIT 1",
-  [phone]
-);
+      "SELECT * FROM testingTrialAcc WHERE phone LIKE ? ORDER BY order_ref_number DESC LIMIT 1",
+      [phone + "%"]
+    );
     if (rows.length === 0) {
       return res
         .status(404)
@@ -570,30 +518,6 @@ apiApp.get("/api/sendMessage/:phone", async (req, res) => {
     res.status(500).json({ error: "Internal server error." });
   } finally {
     if (connection) connection.release();
-  }
-});
-
-// Endpoint to send status update message
-apiApp.post("/api/sendStatusUpdate", async (req, res) => {
-  const order = req.body;
-  try {
-    await sendStatusUpdateMessage(order);
-    res.json({ message: "Status update message sent" });
-  } catch (error) {
-    console.error("Error in sendStatusUpdate endpoint:", error.message);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// Endpoint to send delivery update message
-apiApp.post("/api/sendDeliveryUpdate", async (req, res) => {
-  const order = req.body;
-  try {
-    await sendDeliveryUpdateMessage(order);
-    res.json({ message: "Delivery update message sent" });
-  } catch (error) {
-    console.error("Error in sendDeliveryUpdate endpoint:", error.message);
-    res.status(500).json({ error: "Internal server error" });
   }
 });
 
