@@ -422,9 +422,9 @@ async function processNewShopifyOrders() {
             ? order.shipping_address.city
             : "Unknown",
           phone:
-            order.shipping_address && order.shipping_address.phone
-              ? order.shipping_address.phone
-              : "0000000000",
+  order.shipping_address && order.shipping_address.phone
+    ? convertPhone(order.shipping_address.phone.trim())
+    : "0000000000",
           amount: order.total_price,
           status: "no", // waiting confirmation
           delivery_time: 4,
@@ -550,9 +550,9 @@ apiApp.get("/api/sendMessage/:phone", async (req, res) => {
     connection = await pool.getConnection();
     // Find the latest order for this phone number (assuming there could be multiple orders).
     const [rows] = await connection.query(
-      "SELECT * FROM testingTrialAcc WHERE phone LIKE ? ORDER BY order_ref_number DESC LIMIT 1",
-      [phone + "%"]
-    );
+  "SELECT * FROM testingTrialAcc WHERE phone = ? ORDER BY order_ref_number DESC LIMIT 1",
+  [phone]
+);
     if (rows.length === 0) {
       return res
         .status(404)
