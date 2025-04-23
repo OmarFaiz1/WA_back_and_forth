@@ -22,11 +22,11 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "*",
+    origin: "*", // Adjust to your frontend URL in production
     methods: ["GET", "POST"],
   },
-  transports: ["websocket", "polling"],
-  allowEIO3: true,
+  transports: ["websocket", "polling"], // Explicitly allow both transports
+  allowEIO3: true, // Support for Socket.IO v3 clients
 });
 
 app.use(express.json());
@@ -124,12 +124,12 @@ let waClient = null;
 async function initializeWhatsAppClient() {
   if (waClient) return;
   return new Promise((resolve, reject) => {
-    console.log("Initializing WhatsApp client...");
+    console.log("🔄 Initializing WhatsApp client...");
     waClient = new Client({
       authStrategy: new RemoteAuth({
         store,
         clientId: "order-confirmation-sender",
-        backupSyncIntervalMs: 300000,
+        backupSyncIntervalMs: 300000, // Sync session every 5 minutes
       }),
       puppeteer: {
         headless: process.env.HEADLESS_MODE !== "false",
@@ -146,21 +146,21 @@ async function initializeWhatsAppClient() {
     });
 
     waClient.on("qr", (qr) => {
-      console.log("Scan the QR code to authenticate WhatsApp:");
+      console.log("🔑 QR code generated for authentication.");
       qrcode.generate(qr, { small: false, margin: 2 });
     });
 
     waClient.on("authenticated", () => {
-      console.log("WhatsApp authenticated successfully.");
+      console.log("✅ WhatsApp authenticated successfully.");
     });
 
     waClient.on("auth_failure", (msg) => {
-      console.error("WhatsApp auth failure:", msg);
+      console.error("❌ WhatsApp authentication failed:", msg);
       reject(new Error("WhatsApp auth failure"));
     });
 
     waClient.on("ready", () => {
-      console.log("✅ WhatsApp client is ready.");
+      console.log("🚀 WhatsApp client is ready.");
       resolve();
     });
 
@@ -187,20 +187,21 @@ async function sendOrderConfirmationMessage(order) {
       name: order.customer_name || "Customer",
     };
     const messageText = MESSAGE_TEXT_TEMPLATE(order);
-    console.log(`Sending confirmation message to ${contact.id.user}...`);
+    console.log(`📤 Sending confirmation message to ${contact.id.user}...`);
     const sentMessage = await waClient.sendMessage(
       contact.id._serialized,
       messageText
     );
     if (sentMessage) {
-      console.log(`Message sent to ${contact.id.user}`);
+      console.log(`✅ Message sent to ${contact.id.user}`);
       await updateOrderMessageSent(order.order_ref_number);
       listenForOrderReply(contact, order);
       return true;
     }
+    console.log(`❌ Message sending failed for ${contact.id.user}`);
     return false;
   } catch (error) {
-    console.error("Error sending message:", error.message);
+    console.error("❌ Error sending confirmation message:", error.message);
     return false;
   }
 }
@@ -212,15 +213,16 @@ async function sendDeliveryUpdateMessage(order, newDeliveryTime, reason) {
     phone = convertPhone(phone);
     const waId = `${phone}@c.us`;
     const messageText = DELIVERY_UPDATE_MESSAGE(order, newDeliveryTime, reason);
-    console.log(`Sending delivery update message to ${phone}...`);
+    console.log(`📤 Sending delivery update message to ${phone}...`);
     const sentMessage = await waClient.sendMessage(waId, messageText);
     if (sentMessage) {
-      console.log(`Delivery update message sent to ${phone}`);
+      console.log(`✅ Delivery update message sent to ${phone}`);
       return true;
     }
+    console.log(`❌ Delivery update message failed for ${phone}`);
     return false;
   } catch (error) {
-    console.error("Error sending delivery update message:", error.message);
+    console.error("❌ Error sending delivery update message:", error.message);
     return false;
   }
 }
@@ -232,15 +234,16 @@ async function sendCancellationMessage(order, reason) {
     phone = convertPhone(phone);
     const waId = `${phone}@c.us`;
     const messageText = CANCELLATION_MESSAGE(order, reason);
-    console.log(`Sending cancellation message to ${phone}...`);
+    console.log(`📤 Sending cancellation message to ${phone}...`);
     const sentMessage = await waClient.sendMessage(waId, messageText);
     if (sentMessage) {
-      console.log(`Cancellation message sent to ${phone}`);
+      console.log(`✅ Cancellation message sent to ${phone}`);
       return true;
     }
+    console.log(`❌ Cancellation message failed for ${phone}`);
     return false;
   } catch (error) {
-    console.error("Error sending cancellation message:", error.message);
+    console.error("❌ Error sending cancellation message:", error.message);
     return false;
   }
 }
@@ -252,7 +255,7 @@ function listenForOrderReply(contact, order) {
       const reply = message.body.toLowerCase();
       if (reply === "yes" || reply === "no") {
         console.log(
-          `Received reply for order ${order.order_ref_number}: "${reply}"`
+          `📥 Received reply for order ${order.order_ref_number}: "${reply}"`
         );
         updateOrderStatusViaAPI(order.order_ref_number, reply);
         updateOrderStatusInDB(order.order_ref_number, reply);
@@ -264,7 +267,7 @@ function listenForOrderReply(contact, order) {
   setTimeout(() => {
     waClient.off("message", replyListener);
     console.log(
-      `Stopped listening for reply for order ${order.order_ref_number}`
+      `⏹️ Stopped listening for reply for order ${order.order_ref_number}`
     );
   }, 60000);
 }
@@ -279,11 +282,11 @@ async function updateOrderStatusInDB(orderRefNumber, newStatus) {
       [newStatus, orderRefNumber]
     );
     console.log(
-      `Order ${orderRefNumber} status updated in DB to "${newStatus}"`
+      `✅ Order ${orderRefNumber} status updated in DB to "${newStatus}"`
     );
   } catch (error) {
     console.error(
-      `Error updating order ${orderRefNumber} status in DB:`,
+      `❌ Error updating order ${orderRefNumber} status in DB:`,
       error.message
     );
   } finally {
@@ -300,9 +303,10 @@ async function updateOrderMessageSent(orderRefNumber) {
       "UPDATE testingTrialAcc SET messageSent = 'yes' WHERE order_ref_number = ?",
       [orderRefNumber]
     );
+    console.log(`✅ Marked message sent for order ${orderRefNumber}`);
   } catch (error) {
     console.error(
-      `Error updating messageSent for order ${orderRefNumber}:`,
+      `❌ Error updating messageSent for order ${orderRefNumber}:`,
       error.message
     );
   } finally {
@@ -319,10 +323,10 @@ async function incrementLastMessageCounter(orderRefNumber) {
       "UPDATE testingTrialAcc SET lastMessageSent = lastMessageSent + 1 WHERE order_ref_number = ?",
       [orderRefNumber]
     );
-    console.log(`Incremented lastMessageSent for order ${orderRefNumber}`);
+    console.log(`✅ Incremented lastMessageSent for order ${orderRefNumber}`);
   } catch (error) {
     console.error(
-      `Error incrementing lastMessageSent for order ${orderRefNumber}:`,
+      `❌ Error incrementing lastMessageSent for order ${orderRefNumber}:`,
       error.message
     );
   } finally {
@@ -335,6 +339,9 @@ async function updateOrderStatusViaAPI(orderRefNumber, status) {
   const apiBaseUrl = BASE_URL + "/api";
   const apiKey = process.env.API_KEY || "fastians";
   try {
+    console.log(
+      `📡 Updating status via API for order ${orderRefNumber} to "${status}"`
+    );
     const response = await axios.post(
       `${apiBaseUrl}/order/${orderRefNumber}/update-status`,
       { status },
@@ -346,12 +353,12 @@ async function updateOrderStatusViaAPI(orderRefNumber, status) {
       }
     );
     console.log(
-      `Order ${orderRefNumber} status updated via API:`,
+      `✅ Order ${orderRefNumber} status updated via API:`,
       response.data
     );
   } catch (error) {
     console.error(
-      `Error updating status for order ${orderRefNumber} via API:`,
+      `❌ Error updating status for order ${orderRefNumber} via API:`,
       error.response ? error.response.data : error.message
     );
   }
@@ -360,6 +367,7 @@ async function updateOrderStatusViaAPI(orderRefNumber, status) {
 // Fetch Shopify orders
 async function fetchShopifyOrders() {
   try {
+    console.log("🔄 Fetching orders from Shopify...");
     const url = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/orders.json?status=any`;
     const response = await axios.get(url, {
       headers: {
@@ -367,11 +375,15 @@ async function fetchShopifyOrders() {
       },
     });
     if (response.data && response.data.orders) {
+      console.log(
+        `✅ Fetched ${response.data.orders.length} orders from Shopify`
+      );
       return response.data.orders;
     }
+    console.log("ℹ️ No orders found in Shopify response");
     return [];
   } catch (error) {
-    console.error("Error fetching Shopify orders:", error.message);
+    console.error("❌ Error fetching Shopify orders:", error.message);
     return [];
   }
 }
@@ -380,9 +392,10 @@ async function fetchShopifyOrders() {
 async function processNewShopifyOrders() {
   let connection;
   try {
+    console.log("🔄 Processing new Shopify orders...");
     const orders = await fetchShopifyOrders();
     if (!orders.length) {
-      console.log("No Shopify orders fetched.");
+      console.log("ℹ️ No new Shopify orders to process");
       return;
     }
     connection = await pool.getConnection();
@@ -429,14 +442,14 @@ async function processNewShopifyOrders() {
             insertData.lastMessageSent,
           ]
         );
-        console.log(`Inserted new order ${orderRefNumber} into DB.`);
+        console.log(`✅ Inserted new order ${orderRefNumber} into DB`);
         sendOrderConfirmationMessage(insertData);
       } else {
-        console.log(`Order ${orderRefNumber} already exists in DB.`);
+        console.log(`ℹ️ Order ${orderRefNumber} already exists in DB`);
       }
     }
   } catch (error) {
-    console.error("Error processing Shopify orders:", error.message);
+    console.error("❌ Error processing Shopify orders:", error.message);
   } finally {
     if (connection) connection.release();
   }
@@ -446,6 +459,7 @@ async function processNewShopifyOrders() {
 async function checkForResendMessages() {
   let connection;
   try {
+    console.log("🔄 Checking for orders to resend messages...");
     connection = await pool.getConnection();
     const [orders] = await connection.query(
       "SELECT * FROM testingTrialAcc WHERE status = 'no'"
@@ -456,7 +470,7 @@ async function checkForResendMessages() {
         order.lastMessageSent >= RESEND_HOURS_THRESHOLD
       ) {
         console.log(
-          `Resending confirmation message for order ${order.order_ref_number}`
+          `🔄 Resending confirmation message for order ${order.order_ref_number}`
         );
         const updated = await sendOrderConfirmationMessage(order);
         if (updated) {
@@ -464,8 +478,9 @@ async function checkForResendMessages() {
         }
       }
     }
+    console.log("✅ Resend check completed");
   } catch (error) {
-    console.error("Error checking orders for resend:", error.message);
+    console.error("❌ Error checking orders for resend:", error.message);
   } finally {
     if (connection) connection.release();
   }
@@ -491,12 +506,13 @@ app.get("/api/orders", async (req, res) => {
     queryParams.push(parseInt(deliveryTime));
   }
   try {
-    const [results] = await pool.query(query, queryParams);
     console.log(
-      `✅ Fetched orders with filter: ${filter}, deliveryTime: ${
+      `🔍 Fetching orders with filter: ${filter}, deliveryTime: ${
         deliveryTime || "all"
       }`
     );
+    const [results] = await pool.query(query, queryParams);
+    console.log(`✅ Fetched ${results.length} orders from DB`);
     res.json({ orders: results });
   } catch (err) {
     console.error("❌ Error fetching orders:", err.message);
@@ -512,8 +528,10 @@ app.get("/api/order/:order_ref_number", async (req, res) => {
     WHERE order_ref_number = ?
   `;
   try {
+    console.log(`🔍 Fetching details for order ${order_ref_number}`);
     const [results] = await pool.query(query, [order_ref_number]);
     if (results.length === 0) {
+      console.log(`ℹ️ Order ${order_ref_number} not found`);
       return res.status(404).json({ error: "Order not found" });
     }
     console.log(`✅ Fetched details for order ${order_ref_number}`);
@@ -529,14 +547,20 @@ app.post("/api/order/:order_ref_number/update-status", async (req, res) => {
   const newStatus = req.body.status;
   const cancellationReason = req.body.cancellationReason;
   if (!newStatus || !["yes", "no"].includes(newStatus)) {
+    console.log(
+      `❌ Invalid status for order ${order_ref_number}: ${newStatus}`
+    );
     return res.status(400).json({ error: "Invalid status" });
   }
   const updateSQL =
     "UPDATE testingTrialAcc SET status = ? WHERE order_ref_number = ?";
   try {
+    console.log(
+      `🔄 Updating status for order ${order_ref_number} to "${newStatus}"`
+    );
     await pool.query(updateSQL, [newStatus, order_ref_number]);
     console.log(
-      `✅ Updated status for order ${order_ref_number} to ${newStatus}`
+      `✅ Updated status for order ${order_ref_number} to "${newStatus}"`
     );
     if (newStatus === "no" && cancellationReason) {
       const [orderResults] = await pool.query(
@@ -563,11 +587,17 @@ app.post("/api/order/:order_ref_number/update-delivery", async (req, res) => {
   const newDeliveryTime = parseInt(req.body.delivery_time);
   const delayReason = req.body.delayReason;
   if (isNaN(newDeliveryTime) || newDeliveryTime < 0) {
+    console.log(
+      `❌ Invalid delivery time for order ${order_ref_number}: ${newDeliveryTime}`
+    );
     return res.status(400).json({ error: "Invalid delivery time" });
   }
   const updateSQL =
     "UPDATE testingTrialAcc SET delivery_time = ? WHERE order_ref_number = ?";
   try {
+    console.log(
+      `🔄 Updating delivery time for order ${order_ref_number} to ${newDeliveryTime}`
+    );
     await pool.query(updateSQL, [newDeliveryTime, order_ref_number]);
     console.log(
       `✅ Updated delivery time for order ${order_ref_number} to ${newDeliveryTime}`
@@ -598,34 +628,36 @@ app.post("/api/order/:order_ref_number/update-delivery", async (req, res) => {
 
 // Serve Order Portal Frontend
 app.get("/", (req, res) => {
+  console.log("📄 Serving order portal frontend");
   res.sendFile(path.join(__dirname, "orderPortalSystem", "index.html"));
 });
 
 // WhatsApp Automation Routes
 app.get("/api/status", (req, res) => {
+  console.log("🔍 Health check requested");
   res.json({ status: "ok" });
 });
 
 app.get("/confirm/:orderRef", async (req, res) => {
   const { orderRef } = req.params;
-  console.log(`Order ${orderRef} confirmed via link`);
+  console.log(`🔗 Order ${orderRef} confirmed via link`);
   try {
     await updateOrderStatusViaAPI(orderRef, "yes");
     await updateOrderStatusInDB(orderRef, "yes");
-    console.log(`Order ${orderRef} status set to 'yes' locally.`);
+    console.log(`✅ Order ${orderRef} status set to 'yes' locally`);
   } catch (e) {
-    console.error("Error in confirm link flow:", e);
+    console.error("❌ Error in confirm link flow:", e.message);
   }
   return res.sendFile(path.join(__dirname, "confirm.html"));
 });
 
 app.get("/reject/:orderRef", async (req, res) => {
   const { orderRef } = req.params;
-  console.log(`Order ${orderRef} rejected via link`);
+  console.log(`🔗 Order ${orderRef} rejected via link`);
   try {
     await updateOrderStatusViaAPI(orderRef, "no");
   } catch (e) {
-    console.error("Error updating via API:", e);
+    console.error("❌ Error updating via API:", e.message);
   }
   return res.sendFile(path.join(__dirname, "reject.html"));
 });
@@ -633,16 +665,19 @@ app.get("/reject/:orderRef", async (req, res) => {
 app.get("/api/sendMessage/:phone", async (req, res) => {
   const phone = req.params.phone.trim();
   if (!phone.startsWith("92")) {
+    console.log(`❌ Invalid phone number format: ${phone}`);
     return res.status(400).json({ error: "Phone number must start with 92." });
   }
   let connection;
   try {
+    console.log(`🔄 Sending manual message to ${phone}`);
     connection = await pool.getConnection();
     const [rows] = await connection.query(
       "SELECT * FROM testingTrialAcc WHERE phone LIKE ? ORDER BY order_ref_number DESC LIMIT 1",
       [phone + "%"]
     );
     if (rows.length === 0) {
+      console.log(`ℹ️ No order found for phone ${phone}`);
       return res
         .status(404)
         .json({ error: "No order found for this phone number." });
@@ -650,12 +685,14 @@ app.get("/api/sendMessage/:phone", async (req, res) => {
     const order = rows[0];
     const sent = await sendOrderConfirmationMessage(order);
     if (sent) {
+      console.log(`✅ Manual message sent to ${phone}`);
       res.json({ message: "Confirmation message sent." });
     } else {
+      console.log(`❌ Failed to send manual message to ${phone}`);
       res.status(500).json({ error: "Failed to send confirmation message." });
     }
   } catch (error) {
-    console.error("Error in manual send endpoint:", error.message);
+    console.error("❌ Error in manual send endpoint:", error.message);
     res.status(500).json({ error: "Internal server error: " + error.message });
   } finally {
     if (connection) connection.release();
@@ -664,33 +701,34 @@ app.get("/api/sendMessage/:phone", async (req, res) => {
 
 // Log uncaught exceptions
 process.on("uncaughtException", (err) => {
-  console.error("Uncaught Exception:", err.message, err.stack);
+  console.error("❌ Uncaught Exception:", err.message, err.stack);
 });
 
 // Log unhandled promise rejections
 process.on("unhandledRejection", (reason, promise) => {
-  console.error("Unhandled Rejection at:", promise, "reason:", reason);
+  console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
 });
 
 // Log Socket.IO connection events
 io.on("connection", (socket) => {
-  console.log(`Socket connected: ${socket.id}`);
+  console.log(`🔗 Socket connected: ${socket.id}`);
   socket.on("disconnect", (reason) => {
-    console.log(`Socket disconnected: ${socket.id}, Reason: ${reason}`);
+    console.log(`🔗 Socket disconnected: ${socket.id}, Reason: ${reason}`);
   });
   socket.on("error", (error) => {
-    console.error(`Socket error: ${error.message}`);
+    console.error(`❌ Socket error: ${error.message}`);
   });
 });
 
 // Start server
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
 
 // Start periodic tasks
 initializeWhatsAppClient()
   .then(() => {
+    console.log("🔄 Starting periodic tasks...");
     processNewShopifyOrders();
     setInterval(processNewShopifyOrders, POLL_INTERVAL);
     setInterval(checkForResendMessages, RESEND_CHECK_INTERVAL);
@@ -698,13 +736,13 @@ initializeWhatsAppClient()
     setInterval(() => decrementDeliveryTimes(pool, io), 30 * 1000);
   })
   .catch((err) => {
-    console.error("Fatal: could not initialize WhatsApp client", err);
+    console.error("❌ Fatal: could not initialize WhatsApp client", err);
     process.exit(1);
   });
 
 // Handle graceful shutdown
 process.on("SIGINT", async () => {
-  console.log("Gracefully shutting down...");
+  console.log("🔄 Gracefully shutting down...");
   if (waClient) {
     await waClient.destroy();
   }

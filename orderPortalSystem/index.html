@@ -9,10 +9,28 @@
     <script>
       let currentFilter = "all";
       let currentDeliveryTime = null;
-      const socket = io();
+      const socket = io({
+        transports: ["websocket", "polling"],
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000,
+      });
+
+      socket.on("connect", () => {
+        console.log("🔗 Socket.IO connected");
+      });
+
       socket.on("orders_update", (data) => {
-        console.log("Real-time update received", data);
+        console.log(`📢 Real-time update received: ${data.length} orders`);
         fetchOrders(currentFilter, currentDeliveryTime);
+      });
+
+      socket.on("disconnect", (reason) => {
+        console.log(`🔗 Socket.IO disconnected: ${reason}`);
+      });
+
+      socket.on("error", (error) => {
+        console.error("❌ Socket.IO error:", error);
       });
 
       function showNotification(message) {
@@ -38,15 +56,17 @@
           if (deliveryTime && !isNaN(deliveryTime)) {
             url += "&deliveryTime=" + deliveryTime;
           }
+          console.log(`🔍 Fetching orders with URL: ${url}`);
           const res = await fetch(url);
           const data = await res.json();
           if (data.error) {
-            console.error("Error fetching orders:", data.error);
+            console.error("❌ Error fetching orders:", data.error);
             return;
           }
+          console.log(`✅ Fetched ${data.orders.length} orders`);
           populateTable(data.orders);
         } catch (error) {
-          console.error("Error fetching orders:", error);
+          console.error("❌ Error fetching orders:", error);
         }
       }
 
@@ -73,6 +93,7 @@
 
       async function showDetails(order_ref_number) {
         try {
+          console.log(`🔍 Fetching details for order ${order_ref_number}`);
           const res = await fetch("/api/order/" + order_ref_number);
           const data = await res.json();
           const order = data.order;
@@ -83,8 +104,9 @@
           <p><strong>City:</strong> ${order.city || "N/A"}</p>
         `;
           openModal("detailModal");
+          console.log(`✅ Displayed details for order ${order_ref_number}`);
         } catch (error) {
-          console.error("Error fetching order details:", error);
+          console.error("❌ Error fetching order details:", error);
         }
       }
 
@@ -93,10 +115,16 @@
         currentOrderForStatus = order_ref_number;
         document.getElementById("statusSelect").value = currentStatus;
         openModal("statusModal");
+        console.log(
+          `🔄 Opened status update modal for order ${order_ref_number}`
+        );
       }
 
       async function submitStatusUpdate() {
         const newStatus = document.getElementById("statusSelect").value;
+        console.log(
+          `🔄 Submitting status update for order ${currentOrderForStatus} to "${newStatus}"`
+        );
         if (newStatus === "no") {
           openModal("cancellationReasonModal");
         } else {
@@ -114,8 +142,11 @@
             showNotification(`Status updated to ${newStatus}`);
             closeModal("statusModal");
             fetchOrders(currentFilter, currentDeliveryTime);
+            console.log(
+              `✅ Status updated for order ${currentOrderForStatus} to "${newStatus}"`
+            );
           } catch (error) {
-            console.error("Error updating status:", error);
+            console.error("❌ Error updating status:", error);
             showNotification("Error updating status: " + error.message);
           }
         }
@@ -131,6 +162,7 @@
         const reason = reasonSelect === "custom" ? customReason : reasonSelect;
         if (!reason) {
           showNotification("Please select or enter a cancellation reason.");
+          console.log("❌ No cancellation reason provided");
           return;
         }
         document.getElementById("confirmCancellationReasonText").innerText =
@@ -140,6 +172,9 @@
         document.getElementById("confirmCancellationButton").onclick =
           async () => {
             try {
+              console.log(
+                `🔄 Confirming cancellation for order ${currentOrderForStatus} with reason: ${reason}`
+              );
               const res = await fetch(
                 "/api/order/" + currentOrderForStatus + "/update-status",
                 {
@@ -157,8 +192,11 @@
               closeModal("confirmCancellationModal");
               closeModal("statusModal");
               fetchOrders(currentFilter, currentDeliveryTime);
+              console.log(
+                `✅ Order ${currentOrderForStatus} cancelled with reason: ${reason}`
+              );
             } catch (error) {
-              console.error("Error updating status:", error);
+              console.error("❌ Error updating status:", error);
               showNotification("Error updating status: " + error.message);
             }
           };
@@ -169,6 +207,9 @@
         currentOrderForDelivery = order_ref_number;
         document.getElementById("deliveryInput").value = currentDelivery;
         openModal("deliveryModal");
+        console.log(
+          `🔄 Opened delivery update modal for order ${order_ref_number}`
+        );
       }
 
       async function submitDeliveryUpdate() {
@@ -177,8 +218,12 @@
         );
         if (isNaN(newDelivery) || newDelivery < 0) {
           showNotification("Please enter a valid delivery time.");
+          console.log("❌ Invalid delivery time entered");
           return;
         }
+        console.log(
+          `🔄 Submitting delivery update for order ${currentOrderForDelivery} to ${newDelivery}`
+        );
         openModal("delayReasonModal");
       }
 
@@ -190,6 +235,7 @@
         const reason = reasonSelect === "custom" ? customReason : reasonSelect;
         if (!reason) {
           showNotification("Please select or enter a delay reason.");
+          console.log("❌ No delay reason provided");
           return;
         }
         const newDelivery = parseInt(
@@ -200,6 +246,9 @@
         openModal("confirmDelayModal");
         document.getElementById("confirmDelayButton").onclick = async () => {
           try {
+            console.log(
+              `🔄 Confirming delivery update for order ${currentOrderForDelivery} to ${newDelivery} with reason: ${reason}`
+            );
             const res = await fetch(
               "/api/order/" + currentOrderForDelivery + "/update-delivery",
               {
@@ -219,8 +268,11 @@
             closeModal("confirmDelayModal");
             closeModal("deliveryModal");
             fetchOrders(currentFilter, currentDeliveryTime);
+            console.log(
+              `✅ Delivery updated for order ${currentOrderForDelivery} to ${newDelivery}`
+            );
           } catch (error) {
-            console.error("Error updating delivery:", error);
+            console.error("❌ Error updating delivery:", error);
             showNotification("Error updating delivery: " + error.message);
           }
         };
@@ -262,6 +314,7 @@
           fetchOrders("all", currentDeliveryTime);
         } else {
           showNotification("Please enter a valid delivery time (1-10).");
+          console.log("❌ Invalid delivery filter value");
         }
       }
 
@@ -279,6 +332,7 @@
       }
 
       document.addEventListener("DOMContentLoaded", function () {
+        console.log("🔄 Initial fetch of orders on page load");
         fetchOrders();
       });
     </script>

@@ -8,7 +8,9 @@ async function emitOrdersUpdate(io, pool) {
     FROM testingTrialAcc
   `;
   try {
+    console.log("📢 Preparing to emit orders update...");
     const [results] = await pool.query(selectAll);
+    console.log(`✅ Emitting ${results.length} orders to all clients`);
     io.emit("orders_update", results);
   } catch (err) {
     console.error(
@@ -20,15 +22,23 @@ async function emitOrdersUpdate(io, pool) {
 
 // Function: Fetch orders from Shopify (sample data, replace with real fetch if needed)
 async function fetchShopifyOrders() {
-  return [
-    {
-      order_ref_number: "1001",
-      customer_name: "John Doe",
-      amount: 150,
-      status: "yes",
-      delivery_time: 3,
-    },
-  ];
+  console.log("🔄 Fetching sample orders from Shopify...");
+  try {
+    const orders = [
+      {
+        order_ref_number: "1001",
+        customer_name: "John Doe",
+        amount: 150,
+        status: "yes",
+        delivery_time: 3,
+      },
+    ];
+    console.log(`✅ Fetched ${orders.length} sample orders`);
+    return orders;
+  } catch (error) {
+    console.error("❌ Error fetching Shopify orders:", error.message);
+    return [];
+  }
 }
 
 // Function: Sync Shopify orders with the database
@@ -124,7 +134,7 @@ async function decrementDeliveryTimes(pool, io) {
     console.log(
       `✅ Decremented delivery time for ${results.affectedRows || 0} orders`
     );
-    await emitOrdersUpdate(io, pool); // Emit update to all clients
+    await emitOrdersUpdate(io, pool);
   } catch (err) {
     console.error("❌ Error decrementing delivery times:", err.message);
   }
