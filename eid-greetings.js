@@ -47,7 +47,7 @@ const DB_CONFIG = {
   queueLimit: 0,
 };
 
-const BASE_URL = "https://your-render-app.onrender.com"; // Replace with your Render URL
+const BASE_URL = "https://wa-order-portal.onrender.com/"; // Replace with your Render URL
 
 const MESSAGE_TEXT_TEMPLATE = (order) => {
   const confirmUrl = `${BASE_URL}/confirm/${order.order_ref_number}`;
