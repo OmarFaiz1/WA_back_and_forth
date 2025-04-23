@@ -20,7 +20,14 @@ const {
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+  },
+  transports: ["websocket", "polling"],
+  allowEIO3: true,
+});
 
 app.use(express.json());
 app.use(express.static(__dirname));
@@ -122,7 +129,7 @@ async function initializeWhatsAppClient() {
       authStrategy: new RemoteAuth({
         store,
         clientId: "order-confirmation-sender",
-        backupSyncIntervalMs: 300000, // Sync session every 5 minutes
+        backupSyncIntervalMs: 300000,
       }),
       puppeteer: {
         headless: process.env.HEADLESS_MODE !== "false",
@@ -655,8 +662,29 @@ app.get("/api/sendMessage/:phone", async (req, res) => {
   }
 });
 
+// Log uncaught exceptions
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err.message, err.stack);
+});
+
+// Log unhandled promise rejections
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise, "reason:", reason);
+});
+
+// Log Socket.IO connection events
+io.on("connection", (socket) => {
+  console.log(`Socket connected: ${socket.id}`);
+  socket.on("disconnect", (reason) => {
+    console.log(`Socket disconnected: ${socket.id}, Reason: ${reason}`);
+  });
+  socket.on("error", (error) => {
+    console.error(`Socket error: ${error.message}`);
+  });
+});
+
 // Start server
-server.listen(PORT, () => {
+server.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
 });
 
