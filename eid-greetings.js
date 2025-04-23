@@ -383,7 +383,7 @@ async function checkForResendMessages() {
 }
 
 // Order Portal Routes
-app.get("/api/orders", (req, res) => {
+app.get("/api/orders", async (req, res) => {
   const filter = req.query.filter || "all";
   let query = `
     SELECT order_ref_number, customer_name, amount, status, delivery_time 
@@ -396,37 +396,37 @@ app.get("/api/orders", (req, res) => {
   } else if (filter === "rejected") {
     query += " WHERE status = 'no'";
   }
-  pool.query(query, (err, results) => {
-    if (err) {
-      console.error("❌ Error fetching orders:", err);
-      return res.status(500).json({ error: "Database error" });
-    }
+  try {
+    const [results] = await pool.query(query);
     console.log(`✅ Fetched orders with filter: ${filter}`);
     res.json({ orders: results });
-  });
+  } catch (err) {
+    console.error("❌ Error fetching orders:", err);
+    return res.status(500).json({ error: "Database error" });
+  }
 });
 
-app.get("/api/order/:order_ref_number", (req, res) => {
+app.get("/api/order/:order_ref_number", async (req, res) => {
   const order_ref_number = req.params.order_ref_number;
   const query = `
     SELECT order_ref_number, customer_name, phone, amount, status, delivery_time, city
     FROM testingTrialAcc 
     WHERE order_ref_number = ?
   `;
-  pool.query(query, [order_ref_number], (err, results) => {
-    if (err) {
-      console.error("❌ Error fetching order details:", err);
-      return res.status(500).json({ error: "Database error" });
-    }
+  try {
+    const [results] = await pool.query(query, [order_ref_number]);
     if (results.length === 0) {
       return res.status(404).json({ error: "Order not found" });
     }
     console.log(`✅ Fetched details for order ${order_ref_number}`);
     res.json({ order: results[0] });
-  });
+  } catch (err) {
+    console.error("❌ Error fetching order details:", err);
+    return res.status(500).json({ error: "Database error" });
+  }
 });
 
-app.post("/api/order/:order_ref_number/update-status", (req, res) => {
+app.post("/api/order/:order_ref_number/update-status", async (req, res) => {
   const order_ref_number = req.params.order_ref_number;
   const newStatus = req.body.status;
   if (!newStatus || !["yes", "no"].includes(newStatus)) {
@@ -434,23 +434,23 @@ app.post("/api/order/:order_ref_number/update-status", (req, res) => {
   }
   const updateSQL =
     "UPDATE testingTrialAcc SET status = ? WHERE order_ref_number = ?";
-  pool.query(updateSQL, [newStatus, order_ref_number], (err, results) => {
-    if (err) {
-      console.error(
-        `❌ Error updating status for order ${order_ref_number}:`,
-        err
-      );
-      return res.status(500).json({ error: "Database error" });
-    }
+  try {
+    await pool.query(updateSQL, [newStatus, order_ref_number]);
     console.log(
       `✅ Updated status for order ${order_ref_number} to ${newStatus}`
     );
     emitOrdersUpdate(io);
     res.json({ message: `Status updated to ${newStatus}` });
-  });
+  } catch (err) {
+    console.error(
+      `❌ Error updating status for order ${order_ref_number}:`,
+      err
+    );
+    return res.status(500).json({ error: "Database error" });
+  }
 });
 
-app.post("/api/order/:order_ref_number/update-delivery", (req, res) => {
+app.post("/api/order/:order_ref_number/update-delivery", async (req, res) => {
   const order_ref_number = req.params.order_ref_number;
   const newDeliveryTime = parseInt(req.body.delivery_time);
   if (isNaN(newDeliveryTime) || newDeliveryTime < 0) {
@@ -458,20 +458,20 @@ app.post("/api/order/:order_ref_number/update-delivery", (req, res) => {
   }
   const updateSQL =
     "UPDATE testingTrialAcc SET delivery_time = ? WHERE order_ref_number = ?";
-  pool.query(updateSQL, [newDeliveryTime, order_ref_number], (err, results) => {
-    if (err) {
-      console.error(
-        `❌ Error updating delivery time for order ${order_ref_number}:`,
-        err
-      );
-      return res.status(500).json({ error: "Database error" });
-    }
+  try {
+    await pool.query(updateSQL, [newDeliveryTime, order_ref_number]);
     console.log(
       `✅ Updated delivery time for order ${order_ref_number} to ${newDeliveryTime}`
     );
     emitOrdersUpdate(io);
     res.json({ message: `Delivery time updated to ${newDeliveryTime}` });
-  });
+  } catch (err) {
+    console.error(
+      `❌ Error updating delivery time for order ${order_ref_number}:`,
+      err
+    );
+    return res.status(500).json({ error: "Database error" });
+  }
 });
 
 // Serve Order Portal Frontend
@@ -494,7 +494,7 @@ app.get("/confirm/:orderRef", async (req, res) => {
   } catch (e) {
     console.error("Error in confirm link flow:", e);
   }
-  res.sendFile(path.join(__dirname, "confirm.html"));
+  return res.sendFile(path.join(__dirname, "confirm.html"));
 });
 
 app.get("/reject/:orderRef", async (req, res) => {
@@ -505,7 +505,7 @@ app.get("/reject/:orderRef", async (req, res) => {
   } catch (e) {
     console.error("Error updating via API:", e);
   }
-  res.sendFile(path.join(__dirname, "reject.html"));
+  return res.sendFile(path.join(__dirname, "reject.html"));
 });
 
 app.get("/api/sendMessage/:phone", async (req, res) => {
