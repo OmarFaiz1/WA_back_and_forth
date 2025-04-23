@@ -7,7 +7,8 @@ const path = require("path");
 const express = require("express");
 const mysql = require("mysql2/promise");
 const axios = require("axios");
-const { Client, LocalAuth } = require("whatsapp-web.js");
+const { Client, RemoteAuth } = require("whatsapp-web.js");
+const { MysqlStore } = require("wwebjs-mysql");
 const qrcode = require("qrcode-terminal");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -47,8 +48,9 @@ const DB_CONFIG = {
   queueLimit: 0,
 };
 
-const BASE_URL = "https://wa-order-portal.onrender.com/"; // Replace with your Render URL
+const BASE_URL = "https://wa-order-portal.onrender.com/";
 
+// Message Templates
 const MESSAGE_TEXT_TEMPLATE = (order) => {
   const confirmUrl = `${BASE_URL}/confirm/${order.order_ref_number}`;
   const rejectUrl = `${BASE_URL}/reject/${order.order_ref_number}`;
@@ -100,6 +102,15 @@ Best regards,
 // Initialize MySQL connection pool
 const pool = mysql.createPool(DB_CONFIG);
 
+// Configure MysqlStore for RemoteAuth
+const tableInfo = {
+  table: "wsp_sessions",
+  session_column: "session_name",
+  data_column: "data",
+  updated_at_column: "updated_at",
+};
+const store = new MysqlStore({ pool, tableInfo });
+
 // WhatsApp client initialization
 let waClient = null;
 
@@ -108,9 +119,10 @@ async function initializeWhatsAppClient() {
   return new Promise((resolve, reject) => {
     console.log("Initializing WhatsApp client...");
     waClient = new Client({
-      authStrategy: new LocalAuth({
+      authStrategy: new RemoteAuth({
+        store,
         clientId: "order-confirmation-sender",
-        dataPath: "./.wwebjs_auth",
+        backupSyncIntervalMs: 300000, // Sync session every 5 minutes
       }),
       puppeteer: {
         headless: process.env.HEADLESS_MODE !== "false",
@@ -311,7 +323,7 @@ async function incrementLastMessageCounter(orderRefNumber) {
   }
 }
 
-// Update order status via API (self-referencing now)
+// Update order status via API (self-referencing)
 async function updateOrderStatusViaAPI(orderRefNumber, status) {
   const apiBaseUrl = BASE_URL + "/api";
   const apiKey = process.env.API_KEY || "fastians";
