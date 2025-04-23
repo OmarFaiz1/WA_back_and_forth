@@ -1,44 +1,41 @@
 /**
- * Automated Order Confirmation with Shopify, MySQL, WhatsApp Messaging and Manual Endpoint.
- *
- * This code:
- * - Checks for new orders from Shopify via its REST API.
- * - Inserts new orders into the "testingTrialAcc" table.
- * - Sends an automated WhatsApp confirmation message to the customer.
- * - Rechecks orders every minute (or hourly in production) to resend the message if 4 hours have passed
- *   and the order status is still 'no'. It then increments the lastMessageSent counter.
- * - Exposes an endpoint to manually resend the message by phone number.
+ * Combined Order Portal and WhatsApp Automation System
  */
 
 require("dotenv").config();
 const path = require("path");
-// serve static HTML pages from project root
-
 const express = require("express");
 const mysql = require("mysql2/promise");
 const axios = require("axios");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
-const apiApp = express();
-apiApp.use(express.json());
-const BASE_URL = "https://whatsappautomationwithbuttons-wert.onrender.com";
-apiApp.use(express.static(__dirname));
-// -----------------------------------------------------------------------------
-// Configuration – load from .env or use defaults
+const http = require("http");
+const { Server } = require("socket.io");
+const {
+  emitOrdersUpdate,
+  syncShopifyOrders,
+  decrementDeliveryTimes,
+} = require("./orderPortalSystem/index.js");
 
-const PORT = process.env.API_PORT || 10000;
-const POLL_INTERVAL = process.env.POLL_INTERVAL || 60000; // check Shopify orders every 60 seconds
-const RESEND_CHECK_INTERVAL = process.env.RESEND_CHECK_INTERVAL || 3600000; // check every minute for demo (use 3600000 for hourly)
-const RESEND_HOURS_THRESHOLD = 4; // resend if 4 hours have passed
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
 
-// Shopify credentials and details
+app.use(express.json());
+app.use(express.static(__dirname));
+
+// Configuration
+const PORT = process.env.PORT || 10000;
+const POLL_INTERVAL = process.env.POLL_INTERVAL || 60000;
+const RESEND_CHECK_INTERVAL = process.env.RESEND_CHECK_INTERVAL || 3600000;
+const RESEND_HOURS_THRESHOLD = 4;
+
 const SHOPIFY_STORE_DOMAIN =
   process.env.SHOPIFY_STORE_DOMAIN || "aezenai.myshopify.com";
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2023-10";
 const SHOPIFY_ACCESS_TOKEN =
   process.env.SHOPIFY_ACCESS_TOKEN || "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";
 
-// DB credentials (from your provided information)
 const DB_CONFIG = {
   host: process.env.DB_HOST || "mysql-7818684-zarposhdb.k.aivencloud.com",
   port: process.env.DB_PORT || 26074,
@@ -50,12 +47,11 @@ const DB_CONFIG = {
   queueLimit: 0,
 };
 
-// Automated message content – you can further customize this as needed.
-// Automated message content – now showing two “button” links
+const BASE_URL = "https://your-render-app.onrender.com"; // Replace with your Render URL
+
 const MESSAGE_TEXT_TEMPLATE = (order) => {
   const confirmUrl = `${BASE_URL}/confirm/${order.order_ref_number}`;
   const rejectUrl = `${BASE_URL}/reject/${order.order_ref_number}`;
-
   return `
 Hi *${order.customer_name}*,
 
@@ -71,17 +67,14 @@ ${rejectUrl}
 `;
 };
 
-// -----------------------------------------------------------------------------
 // Initialize MySQL connection pool
 const pool = mysql.createPool(DB_CONFIG);
 
-// -----------------------------------------------------------------------------
 // WhatsApp client initialization
 let waClient = null;
 
 async function initializeWhatsAppClient() {
-  if (waClient) return; // already done
-
+  if (waClient) return;
   return new Promise((resolve, reject) => {
     console.log("Initializing WhatsApp client...");
     waClient = new Client({
@@ -105,7 +98,7 @@ async function initializeWhatsAppClient() {
 
     waClient.on("qr", (qr) => {
       console.log("Scan the QR code to authenticate WhatsApp:");
-      qrcode.generate(qr, { small: false, margin: 2});
+      qrcode.generate(qr, { small: false, margin: 2 });
     });
 
     waClient.on("authenticated", () => {
@@ -124,69 +117,35 @@ async function initializeWhatsAppClient() {
 
     waClient.initialize();
   });
-
-
-
-
-  waClient.on("qr", (qr) => {
-    console.log("Scan the QR code to authenticate WhatsApp:");
-    qrcode.generate(qr, { small: true });
-  });
-
-  waClient.on("authenticated", () => {
-    console.log("WhatsApp authenticated successfully.");
-  });
-
-  waClient.on("auth_failure", (msg) => {
-    console.error("WhatsApp authentication failure:", msg);
-    process.exit(1);
-  });
-
-  waClient.on("ready", () => {
-    console.log("WhatsApp client is ready.");
-  });
-
-  waClient.initialize();
 }
 
-// -----------------------------------------------------------------------------
-// Utility: Convert phone number – if it begins with "0", change it to start with "92"
+// Utility: Convert phone number
 function convertPhone(phone) {
   if (phone.startsWith("0")) {
     return "92" + phone.slice(1);
   }
-  return phone; // if already starts with 92 or other pattern, assume it's correct
+  return phone;
 }
 
-// -----------------------------------------------------------------------------
-// Function to send order confirmation message via WhatsApp
+// Send order confirmation message
 async function sendOrderConfirmationMessage(order) {
   try {
-    // Convert phone number if necessary
     let phone = order.phone.trim();
     phone = convertPhone(phone);
-
-    // Build WhatsApp contact id
     const waId = `${phone}@c.us`;
     const contact = {
       id: { user: phone, _serialized: waId },
       name: order.customer_name || "Customer",
     };
-
-    // Build the message text with order details
     const messageText = MESSAGE_TEXT_TEMPLATE(order);
     console.log(`Sending confirmation message to ${contact.id.user}...`);
-
-    // Send message via WhatsApp client
     const sentMessage = await waClient.sendMessage(
       contact.id._serialized,
       messageText
     );
     if (sentMessage) {
       console.log(`Message sent to ${contact.id.user}`);
-      // Update the DB: mark messageSent as 'yes'
       await updateOrderMessageSent(order.order_ref_number);
-      // Start listening for reply for this order
       listenForOrderReply(contact, order);
       return true;
     }
@@ -197,8 +156,7 @@ async function sendOrderConfirmationMessage(order) {
   }
 }
 
-// -----------------------------------------------------------------------------
-// Listen for immediate reply for a specific order
+// Listen for order reply
 function listenForOrderReply(contact, order) {
   const replyListener = (message) => {
     if (message.from === contact.id._serialized) {
@@ -207,17 +165,13 @@ function listenForOrderReply(contact, order) {
         console.log(
           `Received reply for order ${order.order_ref_number}: "${reply}"`
         );
-        // Upon receiving reply, update order status via REST endpoint
         updateOrderStatusViaAPI(order.order_ref_number, reply);
-        // Also update the database order record to store status immediately
         updateOrderStatusInDB(order.order_ref_number, reply);
         waClient.off("message", replyListener);
       }
     }
   };
-
   waClient.on("message", replyListener);
-  // Stop listening after a timeout (using 1 minute here)
   setTimeout(() => {
     waClient.off("message", replyListener);
     console.log(
@@ -226,8 +180,7 @@ function listenForOrderReply(contact, order) {
   }, 60000);
 }
 
-// -----------------------------------------------------------------------------
-// Function to update order status in the DB
+// Update order status in DB
 async function updateOrderStatusInDB(orderRefNumber, newStatus) {
   let connection;
   try {
@@ -249,8 +202,7 @@ async function updateOrderStatusInDB(orderRefNumber, newStatus) {
   }
 }
 
-// -----------------------------------------------------------------------------
-// Function to mark that the confirmation message has been sent.
+// Mark message sent
 async function updateOrderMessageSent(orderRefNumber) {
   let connection;
   try {
@@ -269,8 +221,7 @@ async function updateOrderMessageSent(orderRefNumber) {
   }
 }
 
-// -----------------------------------------------------------------------------
-// Function to increment the lastMessageSent counter by 1
+// Increment last message counter
 async function incrementLastMessageCounter(orderRefNumber) {
   let connection;
   try {
@@ -290,10 +241,9 @@ async function incrementLastMessageCounter(orderRefNumber) {
   }
 }
 
-// -----------------------------------------------------------------------------
-// Function to call the external REST API to update order status
+// Update order status via API (self-referencing now)
 async function updateOrderStatusViaAPI(orderRefNumber, status) {
-  const apiBaseUrl = "https://testingorderportal-kygk.onrender.com/api";
+  const apiBaseUrl = BASE_URL + "/api";
   const apiKey = process.env.API_KEY || "fastians";
   try {
     const response = await axios.post(
@@ -318,8 +268,7 @@ async function updateOrderStatusViaAPI(orderRefNumber, status) {
   }
 }
 
-// -----------------------------------------------------------------------------
-// Function to fetch Shopify orders via their REST API
+// Fetch Shopify orders
 async function fetchShopifyOrders() {
   try {
     const url = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/orders.json?status=any`;
@@ -338,8 +287,7 @@ async function fetchShopifyOrders() {
   }
 }
 
-// -----------------------------------------------------------------------------
-// Insert new Shopify order into testingTrialAcc (if it does not exist)
+// Process new Shopify orders
 async function processNewShopifyOrders() {
   let connection;
   try {
@@ -350,16 +298,12 @@ async function processNewShopifyOrders() {
     }
     connection = await pool.getConnection();
     for (const order of orders) {
-      // Assume order.order_number is our unique reference
-      // You may need to adjust the mapping based on your shopify order structure.
       const orderRefNumber = order.order_number;
-      // Check if order already exists in the DB table
       const [rows] = await connection.query(
         "SELECT * FROM testingTrialAcc WHERE order_ref_number = ?",
         [orderRefNumber]
       );
       if (rows.length === 0) {
-        // Map Shopify order to our DB schema – adjust field mapping as needed.
         const insertData = {
           order_ref_number: orderRefNumber,
           order_ref: order.id,
@@ -374,13 +318,11 @@ async function processNewShopifyOrders() {
               ? order.shipping_address.phone
               : "0000000000",
           amount: order.total_price,
-          status: "no", // waiting confirmation
+          status: "no",
           delivery_time: 4,
           messageSent: "no",
           lastMessageSent: 0,
         };
-
-        // Insert order into DB
         await connection.query(
           `INSERT INTO testingTrialAcc 
             (order_ref_number, order_ref, customer_name, city, phone, amount, status, delivery_time, messageSent, lastMessageSent) 
@@ -399,7 +341,6 @@ async function processNewShopifyOrders() {
           ]
         );
         console.log(`Inserted new order ${orderRefNumber} into DB.`);
-        // Send automated message
         sendOrderConfirmationMessage(insertData);
       } else {
         console.log(`Order ${orderRefNumber} already exists in DB.`);
@@ -412,10 +353,7 @@ async function processNewShopifyOrders() {
   }
 }
 
-// -----------------------------------------------------------------------------
-// Periodic check to resend confirmation messages if necessary.
-// For each order whose status is still "no", if (lastMessageSent % RESEND_HOURS_THRESHOLD === 0)
-// then resend the confirmation message.
+// Check for resend messages
 async function checkForResendMessages() {
   let connection;
   try {
@@ -424,8 +362,6 @@ async function checkForResendMessages() {
       "SELECT * FROM testingTrialAcc WHERE status = 'no'"
     );
     for (const order of orders) {
-      // Here lastMessageSent represents how many hours have passed since the initial send.
-      // If it is greater than 0 and a multiple of RESEND_HOURS_THRESHOLD, then send again.
       if (
         order.messageSent === "yes" &&
         order.lastMessageSent >= RESEND_HOURS_THRESHOLD
@@ -435,8 +371,6 @@ async function checkForResendMessages() {
         );
         const updated = await sendOrderConfirmationMessage(order);
         if (updated) {
-          // Reset the counter after resending or increment by 1 (as per your requirement)
-          // Here we choose to increment to indicate another hour mark.
           await incrementLastMessageCounter(order.order_ref_number);
         }
       }
@@ -448,34 +382,122 @@ async function checkForResendMessages() {
   }
 }
 
-// -----------------------------------------------------------------------------
-// Express API Server
+// Order Portal Routes
+app.get("/api/orders", (req, res) => {
+  const filter = req.query.filter || "all";
+  let query = `
+    SELECT order_ref_number, customer_name, amount, status, delivery_time 
+    FROM testingTrialAcc
+  `;
+  if (filter === "pending") {
+    query += " WHERE status = 'yes' AND delivery_time > 0";
+  } else if (filter === "completed") {
+    query += " WHERE status = 'yes' AND delivery_time = 0";
+  } else if (filter === "rejected") {
+    query += " WHERE status = 'no'";
+  }
+  pool.query(query, (err, results) => {
+    if (err) {
+      console.error("❌ Error fetching orders:", err);
+      return res.status(500).json({ error: "Database error" });
+    }
+    console.log(`✅ Fetched orders with filter: ${filter}`);
+    res.json({ orders: results });
+  });
+});
 
+app.get("/api/order/:order_ref_number", (req, res) => {
+  const order_ref_number = req.params.order_ref_number;
+  const query = `
+    SELECT order_ref_number, customer_name, phone, amount, status, delivery_time, city
+    FROM testingTrialAcc 
+    WHERE order_ref_number = ?
+  `;
+  pool.query(query, [order_ref_number], (err, results) => {
+    if (err) {
+      console.error("❌ Error fetching order details:", err);
+      return res.status(500).json({ error: "Database error" });
+    }
+    if (results.length === 0) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+    console.log(`✅ Fetched details for order ${order_ref_number}`);
+    res.json({ order: results[0] });
+  });
+});
 
-// Health-check endpoint
-apiApp.get("/api/status", (req, res) => {
+app.post("/api/order/:order_ref_number/update-status", (req, res) => {
+  const order_ref_number = req.params.order_ref_number;
+  const newStatus = req.body.status;
+  if (!newStatus || !["yes", "no"].includes(newStatus)) {
+    return res.status(400).json({ error: "Invalid status" });
+  }
+  const updateSQL =
+    "UPDATE testingTrialAcc SET status = ? WHERE order_ref_number = ?";
+  pool.query(updateSQL, [newStatus, order_ref_number], (err, results) => {
+    if (err) {
+      console.error(
+        `❌ Error updating status for order ${order_ref_number}:`,
+        err
+      );
+      return res.status(500).json({ error: "Database error" });
+    }
+    console.log(
+      `✅ Updated status for order ${order_ref_number} to ${newStatus}`
+    );
+    emitOrdersUpdate(io);
+    res.json({ message: `Status updated to ${newStatus}` });
+  });
+});
+
+app.post("/api/order/:order_ref_number/update-delivery", (req, res) => {
+  const order_ref_number = req.params.order_ref_number;
+  const newDeliveryTime = parseInt(req.body.delivery_time);
+  if (isNaN(newDeliveryTime) || newDeliveryTime < 0) {
+    return res.status(400).json({ error: "Invalid delivery time" });
+  }
+  const updateSQL =
+    "UPDATE testingTrialAcc SET delivery_time = ? WHERE order_ref_number = ?";
+  pool.query(updateSQL, [newDeliveryTime, order_ref_number], (err, results) => {
+    if (err) {
+      console.error(
+        `❌ Error updating delivery time for order ${order_ref_number}:`,
+        err
+      );
+      return res.status(500).json({ error: "Database error" });
+    }
+    console.log(
+      `✅ Updated delivery time for order ${order_ref_number} to ${newDeliveryTime}`
+    );
+    emitOrdersUpdate(io);
+    res.json({ message: `Delivery time updated to ${newDeliveryTime}` });
+  });
+});
+
+// Serve Order Portal Frontend
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "orderPortalSystem", "index.html"));
+});
+
+// WhatsApp Automation Routes
+app.get("/api/status", (req, res) => {
   res.json({ status: "ok" });
 });
 
-apiApp.get("/confirm/:orderRef", async (req, res) => {
+app.get("/confirm/:orderRef", async (req, res) => {
   const { orderRef } = req.params;
   console.log(`Order ${orderRef} confirmed via link`);
   try {
-    // 1) update your external system
     await updateOrderStatusViaAPI(orderRef, "yes");
-    // 2) then also update your local MySQL table
     await updateOrderStatusInDB(orderRef, "yes");
     console.log(`Order ${orderRef} status set to 'yes' locally.`);
   } catch (e) {
     console.error("Error in confirm link flow:", e);
   }
-  // serve the confirmation page
   res.sendFile(path.join(__dirname, "confirm.html"));
 });
 
-
-// Rejection link
-apiApp.get("/reject/:orderRef", async (req, res) => {
+app.get("/reject/:orderRef", async (req, res) => {
   const { orderRef } = req.params;
   console.log(`Order ${orderRef} rejected via link`);
   try {
@@ -486,9 +508,7 @@ apiApp.get("/reject/:orderRef", async (req, res) => {
   res.sendFile(path.join(__dirname, "reject.html"));
 });
 
-// Manual endpoint: trigger automated message sending to a user via phone number.
-// The phone number should start with 92 when provided in the URL.
-apiApp.get("/api/sendMessage/:phone", async (req, res) => {
+app.get("/api/sendMessage/:phone", async (req, res) => {
   const phone = req.params.phone.trim();
   if (!phone.startsWith("92")) {
     return res.status(400).json({ error: "Phone number must start with 92." });
@@ -496,7 +516,6 @@ apiApp.get("/api/sendMessage/:phone", async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
-    // Find the latest order for this phone number (assuming there could be multiple orders).
     const [rows] = await connection.query(
       "SELECT * FROM testingTrialAcc WHERE phone LIKE ? ORDER BY order_ref_number DESC LIMIT 1",
       [phone + "%"]
@@ -521,29 +540,24 @@ apiApp.get("/api/sendMessage/:phone", async (req, res) => {
   }
 });
 
-// Start Express server
-apiApp.listen(PORT, () => {
-  console.log(`API server running on port ${PORT}`);
+// Start server
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
 
-// -----------------------------------------------------------------------------
-// Start main loops
-
-// Initialize WhatsApp client then start periodic tasks.
+// Start periodic tasks
 initializeWhatsAppClient()
   .then(() => {
-    // do an initial fetch/send right away, if you like:
     processNewShopifyOrders();
-
-    // then schedule the regular polls
     setInterval(processNewShopifyOrders, POLL_INTERVAL);
     setInterval(checkForResendMessages, RESEND_CHECK_INTERVAL);
+    setInterval(syncShopifyOrders, 5 * 60 * 1000);
+    setInterval(decrementDeliveryTimes, 30 * 1000);
   })
-  .catch(err => {
+  .catch((err) => {
     console.error("Fatal: could not initialize WhatsApp client", err);
     process.exit(1);
   });
-
 
 // Handle graceful shutdown
 process.on("SIGINT", async () => {

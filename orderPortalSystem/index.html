@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Orders Portal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+      let currentFilter = "all";
+      const socket = io();
+      socket.on("orders_update", (data) => {
+        console.log("Real-time update received", data);
+        fetchOrders(currentFilter);
+      });
+
+      function showNotification(message) {
+        const notif = document.getElementById("notification");
+        notif.innerText = message;
+        notif.classList.remove("hidden");
+        setTimeout(() => {
+          notif.classList.add("hidden");
+        }, 5000);
+      }
+
+      function toggleNavbar() {
+        const menu = document.getElementById("navbar-menu");
+        menu.classList.toggle("hidden");
+      }
+
+      async function fetchOrders(filter = "all") {
+        currentFilter = filter;
+        updateNavbarActive();
+        try {
+          const res = await fetch("/api/orders?filter=" + filter);
+          const data = await res.json();
+          populateTable(data.orders);
+        } catch (error) {
+          console.error("Error fetching orders:", error);
+        }
+      }
+
+      function populateTable(orders) {
+        const tbody = document.getElementById("orders-tbody");
+        tbody.innerHTML = "";
+        orders.forEach((order) => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+          <td class="border px-4 py-2">${order.order_ref_number}</td>
+          <td class="border px-4 py-2">${order.customer_name}</td>
+          <td class="border px-4 py-2">PKR ${order.amount}</td>
+          <td class="border px-4 py-2">${order.status}</td>
+          <td class="border px-4 py-2">${order.delivery_time}</td>
+          <td class="border px-4 py-2">
+            <button class="bg-blue-500 hover:bg-blue-600 text-white px-2 py-1 m-1 rounded transition duration-200" onclick="showDetails('${order.order_ref_number}')">Show All</button>
+            <button class="bg-green-500 hover:bg-green-600 text-white px-2 py-1 m-1 rounded transition duration-200" onclick="openUpdateStatus('${order.order_ref_number}', '${order.status}')">Update Status</button>
+            <button class="bg-yellow-500 hover:bg-yellow-600 text-white px-2 py-1 m-1 rounded transition duration-200" onclick="openUpdateDelivery('${order.order_ref_number}', ${order.delivery_time})">Update Delivery</button>
+          </td>
+        `;
+          tbody.appendChild(tr);
+        });
+      }
+
+      async function showDetails(order_ref_number) {
+        try {
+          const res = await fetch("/api/order/" + order_ref_number);
+          const data = await res.json();
+          const order = data.order;
+          document.getElementById("detailContent").innerHTML = `
+          <p><strong>Customer:</strong> ${order.customer_name}</p>
+          <p><strong>Phone:</strong> ${order.phone || "N/A"}</p>
+          <p><strong>Total:</strong> PKR ${order.amount}</p>
+          <p><strong>City:</strong> ${order.city || "N/A"}</p>
+        `;
+          openModal("detailModal");
+        } catch (error) {
+          console.error("Error fetching order details:", error);
+        }
+      }
+
+      let currentOrderForStatus = null;
+      function openUpdateStatus(order_ref_number, currentStatus) {
+        currentOrderForStatus = order_ref_number;
+        document.getElementById("statusSelect").value = currentStatus;
+        openModal("statusModal");
+      }
+
+      async function submitStatusUpdate() {
+        const newStatus = document.getElementById("statusSelect").value;
+        try {
+          const res = await fetch(
+            "/api/order/" + currentOrderForStatus + "/update-status",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ status: newStatus }),
+            }
+          );
+          const data = await res.json();
+          console.log("Status update response:", data);
+          showNotification(`Status updated to ${newStatus}`);
+          closeModal("statusModal");
+          fetchOrders(currentFilter);
+        } catch (error) {
+          console.error("Error updating status:", error);
+        }
+      }
+
+      let currentOrderForDelivery = null;
+      function openUpdateDelivery(order_ref_number, currentDelivery) {
+        currentOrderForDelivery = order_ref_number;
+        document.getElementById("deliveryInput").value = currentDelivery;
+        openModal("deliveryModal");
+      }
+
+      async function submitDeliveryUpdate() {
+        const newDelivery = document.getElementById("deliveryInput").value;
+        try {
+          const res = await fetch(
+            "/api/order/" + currentOrderForDelivery + "/update-delivery",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ delivery_time: newDelivery }),
+            }
+          );
+          const data = await res.json();
+          console.log("Delivery update response:", data);
+          showNotification(`Delivery time updated to ${newDelivery}`);
+          closeModal("deliveryModal");
+          fetchOrders(currentFilter);
+        } catch (error) {
+          console.error("Error updating delivery:", error);
+        }
+      }
+
+      function openModal(modalId) {
+        document.getElementById(modalId).classList.remove("hidden");
+      }
+      function closeModal(modalId) {
+        document.getElementById(modalId).classList.add("hidden");
+      }
+      window.onclick = function (event) {
+        const modals = document.getElementsByClassName("modal");
+        for (let modal of modals) {
+          if (!modal.classList.contains("hidden") && event.target === modal) {
+            modal.classList.add("hidden");
+          }
+        }
+      };
+
+      function setFilter(filter) {
+        currentFilter = filter;
+        fetchOrders(filter);
+      }
+      function updateNavbarActive() {
+        const links = document.getElementsByClassName("nav-link");
+        for (let link of links) {
+          if (link.getAttribute("data-filter") === currentFilter) {
+            link.classList.add("bg-blue-700", "text-white", "shadow-md");
+            link.classList.remove("bg-transparent", "text-blue-500");
+          } else {
+            link.classList.remove("bg-blue-700", "text-white", "shadow-md");
+            link.classList.add("bg-transparent", "text-blue-500");
+          }
+        }
+      }
+
+      document.addEventListener("DOMContentLoaded", function () {
+        fetchOrders();
+      });
+    </script>
+  </head>
+  <body class="bg-gray-100">
+    <div
+      id="notification"
+      class="fixed top-4 left-4 bg-green-500 text-white px-4 py-2 rounded shadow hidden"
+    ></div>
+    <header class="bg-gray-900 text-white shadow-lg">
+      <div
+        class="container mx-auto px-4 flex items-center justify-between py-4"
+      >
+        <h1 class="text-4xl font-extrabold">Orders Portal</h1>
+        <nav class="hidden md:block">
+          <ul class="flex space-x-4">
+            <li>
+              <a
+                href="#"
+                data-filter="all"
+                class="nav-link block py-2 px-4 rounded transition-colors duration-200 hover:bg-blue-600 hover:text-white"
+                onclick="setFilter('all')"
+                >All Orders</a
+              >
+            </li>
+            <li>
+              <a
+                href="#"
+                data-filter="pending"
+                class="nav-link block py-2 px-4 rounded transition-colors duration-200 hover:bg-blue-600 hover:text-white"
+                onclick="setFilter('pending')"
+                >Pending Orders</a
+              >
+            </li>
+            <li>
+              <a
+                href="#"
+                data-filter="completed"
+                class="nav-link block py-2 px-4 rounded transition-colors duration-200 hover:bg-blue-600 hover:text-white"
+                onclick="setFilter('completed')"
+                >Completed Orders</a
+              >
+            </li>
+            <li>
+              <a
+                href="#"
+                data-filter="rejected"
+                class="nav-link block py-2 px-4 rounded transition-colors duration-200 hover:bg-blue-600 hover:text-white"
+                onclick="setFilter('rejected')"
+                >Rejected Orders</a
+              >
+            </li>
+          </ul>
+        </nav>
+        <button
+          id="hamburger"
+          class="md:hidden text-white focus:outline-none"
+          onclick="toggleNavbar()"
+        >
+          <svg
+            class="w-6 h-6"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="2"
+              d="M4 6h16M4 12h16M4 18h16"
+            ></path>
+          </svg>
+        </button>
+      </div>
+      <nav class="md:hidden bg-gray-800">
+        <ul id="navbar-menu" class="flex flex-col space-y-1 px-4 pb-4 hidden">
+          <li>
+            <a
+              href="#"
+              data-filter="all"
+              class="nav-link block py-2 px-4 rounded transition-colors duration-200 hover:bg-blue-600 hover:text-white"
+              onclick="setFilter('all'); toggleNavbar()"
+              >All Orders</a
+            >
+          </li>
+          <li>
+            <a
+              href="#"
+              data-filter="pending"
+              class="nav-link block py-2 px-4 rounded transition-colors duration-200 hover:bg-blue-600 hover:text-white"
+              onclick="setFilter('pending'); toggleNavbar()"
+              >Pending Orders</a
+            >
+          </li>
+          <li>
+            <a
+              href="#"
+              data-filter="completed"
+              class="nav-link block py-2 px-4 rounded transition-colors duration-200 hover:bg-blue-600 hover:text-white"
+              onclick="setFilter('completed'); toggleNavbar()"
+              >Completed Orders</a
+            >
+          </li>
+          <li>
+            <a
+              href="#"
+              data-filter="rejected"
+              class="nav-link block py-2 px-4 rounded transition-colors duration-200 hover:bg-blue-600 hover:text-white"
+              onclick="setFilter('rejected'); toggleNavbar()"
+              >Rejected Orders</a
+            >
+          </li>
+        </ul>
+      </nav>
+    </header>
+    <div class="container mx-auto px-4 mt-6">
+      <table class="min-w-full bg-white shadow rounded">
+        <thead>
+          <tr>
+            <th class="py-2 px-4 border">Order Ref</th>
+            <th class="py-2 px-4 border">Name</th>
+            <th class="py-2 px-4 border">Total</th>
+            <th class="py-2 px-4 border">Status</th>
+            <th class="py-2 px-4 border">Delivery</th>
+            <th class="py-2 px-4 border">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="orders-tbody"></tbody>
+      </table>
+    </div>
+    <div
+      id="detailModal"
+      class="modal fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden"
+    >
+      <div class="bg-white p-6 rounded shadow-lg">
+        <h2 class="text-2xl font-bold mb-4">Order Details</h2>
+        <div id="detailContent"></div>
+        <button
+          onclick="closeModal('detailModal')"
+          class="mt-4 bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded"
+        >
+          Close
+        </button>
+      </div>
+    </div>
+    <div
+      id="statusModal"
+      class="modal fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden"
+    >
+      <div class="bg-white p-6 rounded shadow-lg">
+        <h2 class="text-2xl font-bold mb-4">Update Status</h2>
+        <select id="statusSelect" class="border p-2 mb-4 w-full">
+          <option value="yes">Yes</option>
+          <option value="no">No</option>
+        </select>
+        <div class="flex justify-end">
+          <button
+            onclick="submitStatusUpdate()"
+            class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded mr-2"
+          >
+            Update
+          </button>
+          <button
+            onclick="closeModal('statusModal')"
+            class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+    <div
+      id="deliveryModal"
+      class="modal fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden"
+    >
+      <div class="bg-white p-6 rounded shadow-lg">
+        <h2 class="text-2xl font-bold mb-4">Update Delivery Time</h2>
+        <input
+          type="number"
+          id="deliveryInput"
+          class="border p-2 mb-4 w-full"
+          min="0"
+          placeholder="Enter delivery days"
+        />
+        <div class="flex justify-end">
+          <button
+            onclick="submitDeliveryUpdate()"
+            class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded mr-2"
+          >
+            Update
+          </button>
+          <button
+            onclick="closeModal('deliveryModal')"
+            class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
