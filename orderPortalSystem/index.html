@@ -8,10 +8,11 @@
     <script src="/socket.io/socket.io.js"></script>
     <script>
       let currentFilter = "all";
+      let currentDeliveryTime = null;
       const socket = io();
       socket.on("orders_update", (data) => {
         console.log("Real-time update received", data);
-        fetchOrders(currentFilter);
+        fetchOrders(currentFilter, currentDeliveryTime);
       });
 
       function showNotification(message) {
@@ -28,12 +29,21 @@
         menu.classList.toggle("hidden");
       }
 
-      async function fetchOrders(filter = "all") {
+      async function fetchOrders(filter = "all", deliveryTime = null) {
         currentFilter = filter;
+        currentDeliveryTime = deliveryTime;
         updateNavbarActive();
         try {
-          const res = await fetch("/api/orders?filter=" + filter);
+          let url = "/api/orders?filter=" + filter;
+          if (deliveryTime && !isNaN(deliveryTime)) {
+            url += "&deliveryTime=" + deliveryTime;
+          }
+          const res = await fetch(url);
           const data = await res.json();
+          if (data.error) {
+            console.error("Error fetching orders:", data.error);
+            return;
+          }
           populateTable(data.orders);
         } catch (error) {
           console.error("Error fetching orders:", error);
@@ -87,23 +97,71 @@
 
       async function submitStatusUpdate() {
         const newStatus = document.getElementById("statusSelect").value;
-        try {
-          const res = await fetch(
-            "/api/order/" + currentOrderForStatus + "/update-status",
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ status: newStatus }),
-            }
-          );
-          const data = await res.json();
-          console.log("Status update response:", data);
-          showNotification(`Status updated to ${newStatus}`);
-          closeModal("statusModal");
-          fetchOrders(currentFilter);
-        } catch (error) {
-          console.error("Error updating status:", error);
+        if (newStatus === "no") {
+          openModal("cancellationReasonModal");
+        } else {
+          try {
+            const res = await fetch(
+              "/api/order/" + currentOrderForStatus + "/update-status",
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ status: newStatus }),
+              }
+            );
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            showNotification(`Status updated to ${newStatus}`);
+            closeModal("statusModal");
+            fetchOrders(currentFilter, currentDeliveryTime);
+          } catch (error) {
+            console.error("Error updating status:", error);
+            showNotification("Error updating status: " + error.message);
+          }
         }
+      }
+
+      async function submitCancellationReason() {
+        const reasonSelect = document.getElementById(
+          "cancellationReasonSelect"
+        ).value;
+        const customReason = document
+          .getElementById("customCancellationReason")
+          .value.trim();
+        const reason = reasonSelect === "custom" ? customReason : reasonSelect;
+        if (!reason) {
+          showNotification("Please select or enter a cancellation reason.");
+          return;
+        }
+        document.getElementById("confirmCancellationReasonText").innerText =
+          reason;
+        closeModal("cancellationReasonModal");
+        openModal("confirmCancellationModal");
+        document.getElementById("confirmCancellationButton").onclick =
+          async () => {
+            try {
+              const res = await fetch(
+                "/api/order/" + currentOrderForStatus + "/update-status",
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    status: "no",
+                    cancellationReason: reason,
+                  }),
+                }
+              );
+              const data = await res.json();
+              if (data.error) throw new Error(data.error);
+              showNotification("Status updated to no and message sent.");
+              closeModal("confirmCancellationModal");
+              closeModal("statusModal");
+              fetchOrders(currentFilter, currentDeliveryTime);
+            } catch (error) {
+              console.error("Error updating status:", error);
+              showNotification("Error updating status: " + error.message);
+            }
+          };
       }
 
       let currentOrderForDelivery = null;
@@ -114,24 +172,58 @@
       }
 
       async function submitDeliveryUpdate() {
-        const newDelivery = document.getElementById("deliveryInput").value;
-        try {
-          const res = await fetch(
-            "/api/order/" + currentOrderForDelivery + "/update-delivery",
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ delivery_time: newDelivery }),
-            }
-          );
-          const data = await res.json();
-          console.log("Delivery update response:", data);
-          showNotification(`Delivery time updated to ${newDelivery}`);
-          closeModal("deliveryModal");
-          fetchOrders(currentFilter);
-        } catch (error) {
-          console.error("Error updating delivery:", error);
+        const newDelivery = parseInt(
+          document.getElementById("deliveryInput").value
+        );
+        if (isNaN(newDelivery) || newDelivery < 0) {
+          showNotification("Please enter a valid delivery time.");
+          return;
         }
+        openModal("delayReasonModal");
+      }
+
+      async function submitDelayReason() {
+        const reasonSelect = document.getElementById("delayReasonSelect").value;
+        const customReason = document
+          .getElementById("customDelayReason")
+          .value.trim();
+        const reason = reasonSelect === "custom" ? customReason : reasonSelect;
+        if (!reason) {
+          showNotification("Please select or enter a delay reason.");
+          return;
+        }
+        const newDelivery = parseInt(
+          document.getElementById("deliveryInput").value
+        );
+        document.getElementById("confirmDelayReasonText").innerText = reason;
+        closeModal("delayReasonModal");
+        openModal("confirmDelayModal");
+        document.getElementById("confirmDelayButton").onclick = async () => {
+          try {
+            const res = await fetch(
+              "/api/order/" + currentOrderForDelivery + "/update-delivery",
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  delivery_time: newDelivery,
+                  delayReason: reason,
+                }),
+              }
+            );
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            showNotification(
+              `Delivery time updated to ${newDelivery} and message sent.`
+            );
+            closeModal("confirmDelayModal");
+            closeModal("deliveryModal");
+            fetchOrders(currentFilter, currentDeliveryTime);
+          } catch (error) {
+            console.error("Error updating delivery:", error);
+            showNotification("Error updating delivery: " + error.message);
+          }
+        };
       }
 
       function openModal(modalId) {
@@ -151,8 +243,28 @@
 
       function setFilter(filter) {
         currentFilter = filter;
+        currentDeliveryTime = null;
+        document.getElementById("deliveryFilter").value = "all";
         fetchOrders(filter);
       }
+
+      function setDeliveryFilter() {
+        const deliveryTime = document.getElementById("deliveryFilter").value;
+        if (deliveryTime === "all") {
+          currentDeliveryTime = null;
+          fetchOrders(currentFilter);
+        } else if (
+          !isNaN(deliveryTime) &&
+          deliveryTime >= 1 &&
+          deliveryTime <= 10
+        ) {
+          currentDeliveryTime = parseInt(deliveryTime);
+          fetchOrders("all", currentDeliveryTime);
+        } else {
+          showNotification("Please enter a valid delivery time (1-10).");
+        }
+      }
+
       function updateNavbarActive() {
         const links = document.getElementsByClassName("nav-link");
         for (let link of links) {
@@ -180,7 +292,29 @@
       <div
         class="container mx-auto px-4 flex items-center justify-between py-4"
       >
-        <h1 class="text-4xl font-extrabold">Orders Portal</h1>
+        <div class="flex items-center space-x-4">
+          <h1 class="text-4xl font-extrabold">Orders Portal</h1>
+          <div>
+            <label for="deliveryFilter" class="mr-2">Delivery Time:</label>
+            <select
+              id="deliveryFilter"
+              onchange="setDeliveryFilter()"
+              class="border p-2 rounded text-black"
+            >
+              <option value="all">All</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+              <option value="5">5</option>
+              <option value="6">6</option>
+              <option value="7">7</option>
+              <option value="8">8</option>
+              <option value="9">9</option>
+              <option value="10">10</option>
+            </select>
+          </div>
+        </div>
         <nav class="hidden md:block">
           <ul class="flex space-x-4">
             <li>
@@ -339,6 +473,68 @@
       </div>
     </div>
     <div
+      id="cancellationReasonModal"
+      class="modal fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden"
+    >
+      <div class="bg-white p-6 rounded shadow-lg">
+        <h2 class="text-2xl font-bold mb-4">Reason for Cancellation</h2>
+        <select id="cancellationReasonSelect" class="border p-2 mb-4 w-full">
+          <option value="Customer Request">Customer Request</option>
+          <option value="Out of Stock">Out of Stock</option>
+          <option value="Payment Issue">Payment Issue</option>
+          <option value="custom">Custom Reason</option>
+        </select>
+        <textarea
+          id="customCancellationReason"
+          class="border p-2 mb-4 w-full hidden"
+          placeholder="Enter custom reason"
+        ></textarea>
+        <div class="flex justify-end">
+          <button
+            onclick="submitCancellationReason()"
+            class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded mr-2"
+          >
+            OK
+          </button>
+          <button
+            onclick="closeModal('cancellationReasonModal')"
+            class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+    <div
+      id="confirmCancellationModal"
+      class="modal fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden"
+    >
+      <div class="bg-white p-6 rounded shadow-lg">
+        <h2 class="text-2xl font-bold mb-4">Confirm Cancellation</h2>
+        <p>
+          Are you sure you want to cancel this order with the following reason?
+        </p>
+        <p class="my-4">
+          <strong>Reason:</strong>
+          <span id="confirmCancellationReasonText"></span>
+        </p>
+        <div class="flex justify-end">
+          <button
+            id="confirmCancellationButton"
+            class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded mr-2"
+          >
+            OK
+          </button>
+          <button
+            onclick="closeModal('confirmCancellationModal')"
+            class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+    <div
       id="deliveryModal"
       class="modal fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden"
     >
@@ -367,5 +563,86 @@
         </div>
       </div>
     </div>
+    <div
+      id="delayReasonModal"
+      class="modal fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden"
+    >
+      <div class="bg-white p-6 rounded shadow-lg">
+        <h2 class="text-2xl font-bold mb-4">Reason for Delay</h2>
+        <select
+          id="delayReasonSelect"
+          class="border p-2 mb-4 w-full"
+          onchange="toggleCustomDelayReason()"
+        >
+          <option value="Production Delay">Production Delay</option>
+          <option value="Shipping Issue">Shipping Issue</option>
+          <option value="Inventory Shortage">Inventory Shortage</option>
+          <option value="custom">Custom Reason</option>
+        </select>
+        <textarea
+          id="customDelayReason"
+          class="border p-2 mb-4 w-full hidden"
+          placeholder="Enter custom reason"
+        ></textarea>
+        <div class="flex justify-end">
+          <button
+            onclick="submitDelayReason()"
+            class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded mr-2"
+          >
+            OK
+          </button>
+          <button
+            onclick="closeModal('delayReasonModal')"
+            class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+    <div
+      id="confirmDelayModal"
+      class="modal fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center hidden"
+    >
+      <div class="bg-white p-6 rounded shadow-lg">
+        <h2 class="text-2xl font-bold mb-4">Confirm Delay</h2>
+        <p>
+          Are you sure you want to update the delivery time with the following
+          reason?
+        </p>
+        <p class="my-4">
+          <strong>Reason:</strong> <span id="confirmDelayReasonText"></span>
+        </p>
+        <div class="flex justify-end">
+          <button
+            id="confirmDelayButton"
+            class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded mr-2"
+          >
+            OK
+          </button>
+          <button
+            onclick="closeModal('confirmDelayModal')"
+            class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+    <script>
+      function toggleCustomDelayReason() {
+        const select = document.getElementById("delayReasonSelect");
+        const textarea = document.getElementById("customDelayReason");
+        textarea.classList.toggle("hidden", select.value !== "custom");
+      }
+      function toggleCustomCancellationReason() {
+        const select = document.getElementById("cancellationReasonSelect");
+        const textarea = document.getElementById("customCancellationReason");
+        textarea.classList.toggle("hidden", select.value !== "custom");
+      }
+      document
+        .getElementById("cancellationReasonSelect")
+        .addEventListener("change", toggleCustomCancellationReason);
+    </script>
   </body>
 </html>

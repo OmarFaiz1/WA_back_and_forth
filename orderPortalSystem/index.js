@@ -112,7 +112,7 @@ async function syncShopifyOrders(pool) {
 }
 
 // Function: Decrement delivery_time every 30 seconds
-async function decrementDeliveryTimes(pool) {
+async function decrementDeliveryTimes(pool, io) {
   console.log("🔄 Running delivery time decrement job...");
   const updateQuery = `
     UPDATE testingTrialAcc
@@ -124,6 +124,7 @@ async function decrementDeliveryTimes(pool) {
     console.log(
       `✅ Decremented delivery time for ${results.affectedRows || 0} orders`
     );
+    await emitOrdersUpdate(io, pool); // Emit update to all clients
   } catch (err) {
     console.error("❌ Error decrementing delivery times:", err.message);
   }

@@ -67,6 +67,36 @@ ${rejectUrl}
 `;
 };
 
+const DELIVERY_UPDATE_MESSAGE = (order, newDeliveryTime, reason) => {
+  return `
+Dear *${order.customer_name}*,
+
+We are updating the delivery timeline for your order *${order.order_ref_number}* (PKR *${order.amount}*). The new expected delivery time is *${newDeliveryTime} day(s)*.
+
+*Reason for Delay*: ${reason}
+
+We apologize for any inconvenience and appreciate your understanding. Please contact us if you have any questions.
+
+Best regards,
+[Your Company Name]
+`;
+};
+
+const CANCELLATION_MESSAGE = (order, reason) => {
+  return `
+Dear *${order.customer_name}*,
+
+We regret to inform you that your order *${order.order_ref_number}* (PKR *${order.amount}*) has been cancelled.
+
+*Reason for Cancellation*: ${reason}
+
+We apologize for any inconvenience caused. Please contact us if you have any questions or need further assistance.
+
+Best regards,
+[Your Company Name]
+`;
+};
+
 // Initialize MySQL connection pool
 const pool = mysql.createPool(DB_CONFIG);
 
@@ -156,6 +186,46 @@ async function sendOrderConfirmationMessage(order) {
   }
 }
 
+// Send delivery update message
+async function sendDeliveryUpdateMessage(order, newDeliveryTime, reason) {
+  try {
+    let phone = order.phone.trim();
+    phone = convertPhone(phone);
+    const waId = `${phone}@c.us`;
+    const messageText = DELIVERY_UPDATE_MESSAGE(order, newDeliveryTime, reason);
+    console.log(`Sending delivery update message to ${phone}...`);
+    const sentMessage = await waClient.sendMessage(waId, messageText);
+    if (sentMessage) {
+      console.log(`Delivery update message sent to ${phone}`);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    console.error("Error sending delivery update message:", error.message);
+    return false;
+  }
+}
+
+// Send cancellation message
+async function sendCancellationMessage(order, reason) {
+  try {
+    let phone = order.phone.trim();
+    phone = convertPhone(phone);
+    const waId = `${phone}@c.us`;
+    const messageText = CANCELLATION_MESSAGE(order, reason);
+    console.log(`Sending cancellation message to ${phone}...`);
+    const sentMessage = await waClient.sendMessage(waId, messageText);
+    if (sentMessage) {
+      console.log(`Cancellation message sent to ${phone}`);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    console.error("Error sending cancellation message:", error.message);
+    return false;
+  }
+}
+
 // Listen for order reply
 function listenForOrderReply(contact, order) {
   const replyListener = (message) => {
@@ -228,7 +298,7 @@ async function incrementLastMessageCounter(orderRefNumber) {
     connection = await pool.getConnection();
     await connection.query(
       "UPDATE testingTrialAcc SET lastMessageSent = lastMessageSent + 1 WHERE order_ref_number = ?",
-      _banner_start[orderRefNumber]
+      [orderRefNumber]
     );
     console.log(`Incremented lastMessageSent for order ${orderRefNumber}`);
   } catch (error) {
@@ -385,20 +455,29 @@ async function checkForResendMessages() {
 // Order Portal Routes
 app.get("/api/orders", async (req, res) => {
   const filter = req.query.filter || "all";
+  const deliveryTime = req.query.deliveryTime;
   let query = `
     SELECT order_ref_number, customer_name, amount, status, delivery_time 
     FROM testingTrialAcc
   `;
+  let queryParams = [];
   if (filter === "pending") {
     query += " WHERE status = 'yes' AND delivery_time > 0";
   } else if (filter === "completed") {
     query += " WHERE status = 'yes' AND delivery_time = 0";
   } else if (filter === "rejected") {
     query += " WHERE status = 'no'";
+  } else if (deliveryTime && !isNaN(deliveryTime)) {
+    query += " WHERE delivery_time = ?";
+    queryParams.push(parseInt(deliveryTime));
   }
   try {
-    const [results] = await pool.query(query);
-    console.log(`✅ Fetched orders with filter: ${filter}`);
+    const [results] = await pool.query(query, queryParams);
+    console.log(
+      `✅ Fetched orders with filter: ${filter}, deliveryTime: ${
+        deliveryTime || "all"
+      }`
+    );
     res.json({ orders: results });
   } catch (err) {
     console.error("❌ Error fetching orders:", err.message);
@@ -429,6 +508,7 @@ app.get("/api/order/:order_ref_number", async (req, res) => {
 app.post("/api/order/:order_ref_number/update-status", async (req, res) => {
   const order_ref_number = req.params.order_ref_number;
   const newStatus = req.body.status;
+  const cancellationReason = req.body.cancellationReason;
   if (!newStatus || !["yes", "no"].includes(newStatus)) {
     return res.status(400).json({ error: "Invalid status" });
   }
@@ -439,6 +519,15 @@ app.post("/api/order/:order_ref_number/update-status", async (req, res) => {
     console.log(
       `✅ Updated status for order ${order_ref_number} to ${newStatus}`
     );
+    if (newStatus === "no" && cancellationReason) {
+      const [orderResults] = await pool.query(
+        "SELECT * FROM testingTrialAcc WHERE order_ref_number = ?",
+        [order_ref_number]
+      );
+      if (orderResults.length > 0) {
+        await sendCancellationMessage(orderResults[0], cancellationReason);
+      }
+    }
     await emitOrdersUpdate(io, pool);
     res.json({ message: `Status updated to ${newStatus}` });
   } catch (err) {
@@ -453,6 +542,7 @@ app.post("/api/order/:order_ref_number/update-status", async (req, res) => {
 app.post("/api/order/:order_ref_number/update-delivery", async (req, res) => {
   const order_ref_number = req.params.order_ref_number;
   const newDeliveryTime = parseInt(req.body.delivery_time);
+  const delayReason = req.body.delayReason;
   if (isNaN(newDeliveryTime) || newDeliveryTime < 0) {
     return res.status(400).json({ error: "Invalid delivery time" });
   }
@@ -463,6 +553,19 @@ app.post("/api/order/:order_ref_number/update-delivery", async (req, res) => {
     console.log(
       `✅ Updated delivery time for order ${order_ref_number} to ${newDeliveryTime}`
     );
+    if (delayReason) {
+      const [orderResults] = await pool.query(
+        "SELECT * FROM testingTrialAcc WHERE order_ref_number = ?",
+        [order_ref_number]
+      );
+      if (orderResults.length > 0) {
+        await sendDeliveryUpdateMessage(
+          orderResults[0],
+          newDeliveryTime,
+          delayReason
+        );
+      }
+    }
     await emitOrdersUpdate(io, pool);
     res.json({ message: `Delivery time updated to ${newDeliveryTime}` });
   } catch (err) {
@@ -552,7 +655,7 @@ initializeWhatsAppClient()
     setInterval(processNewShopifyOrders, POLL_INTERVAL);
     setInterval(checkForResendMessages, RESEND_CHECK_INTERVAL);
     setInterval(() => syncShopifyOrders(pool), 5 * 60 * 1000);
-    setInterval(() => decrementDeliveryTimes(pool), 30 * 1000);
+    setInterval(() => decrementDeliveryTimes(pool, io), 30 * 1000);
   })
   .catch((err) => {
     console.error("Fatal: could not initialize WhatsApp client", err);
