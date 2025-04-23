@@ -11,7 +11,10 @@ async function emitOrdersUpdate(io, pool) {
     const [results] = await pool.query(selectAll);
     io.emit("orders_update", results);
   } catch (err) {
-    console.error("❌ Error fetching orders for real-time update:", err);
+    console.error(
+      "❌ Error fetching orders for real-time update:",
+      err.message
+    );
   }
 }
 
@@ -90,7 +93,7 @@ async function syncShopifyOrders(pool) {
       } catch (err) {
         console.error(
           `❌ Error processing order ${order.order_ref_number}:`,
-          err
+          err.message
         );
       }
     });
@@ -103,7 +106,7 @@ async function syncShopifyOrders(pool) {
     console.log(`Orders unchanged: ${unchangedCount}`);
     console.log("----- End of Summary -----");
   } catch (err) {
-    console.error("❌ Fatal error in Shopify sync job:", err);
+    console.error("❌ Fatal error in Shopify sync job:", err.message);
     throw err;
   }
 }
@@ -119,10 +122,10 @@ async function decrementDeliveryTimes(pool) {
   try {
     const [results] = await pool.query(updateQuery);
     console.log(
-      `✅ Decremented delivery time for ${results.affectedRows} orders`
+      `✅ Decremented delivery time for ${results.affectedRows || 0} orders`
     );
   } catch (err) {
-    console.error("❌ Error decrementing delivery times:", err);
+    console.error("❌ Error decrementing delivery times:", err.message);
   }
 }
 

@@ -228,7 +228,7 @@ async function incrementLastMessageCounter(orderRefNumber) {
     connection = await pool.getConnection();
     await connection.query(
       "UPDATE testingTrialAcc SET lastMessageSent = lastMessageSent + 1 WHERE order_ref_number = ?",
-      [orderRefNumber]
+      _banner_start[orderRefNumber]
     );
     console.log(`Incremented lastMessageSent for order ${orderRefNumber}`);
   } catch (error) {
@@ -401,8 +401,8 @@ app.get("/api/orders", async (req, res) => {
     console.log(`✅ Fetched orders with filter: ${filter}`);
     res.json({ orders: results });
   } catch (err) {
-    console.error("❌ Error fetching orders:", err);
-    return res.status(500).json({ error: "Database error" });
+    console.error("❌ Error fetching orders:", err.message);
+    res.status(500).json({ error: "Database error: " + err.message });
   }
 });
 
@@ -421,8 +421,8 @@ app.get("/api/order/:order_ref_number", async (req, res) => {
     console.log(`✅ Fetched details for order ${order_ref_number}`);
     res.json({ order: results[0] });
   } catch (err) {
-    console.error("❌ Error fetching order details:", err);
-    return res.status(500).json({ error: "Database error" });
+    console.error("❌ Error fetching order details:", err.message);
+    res.status(500).json({ error: "Database error: " + err.message });
   }
 });
 
@@ -439,14 +439,14 @@ app.post("/api/order/:order_ref_number/update-status", async (req, res) => {
     console.log(
       `✅ Updated status for order ${order_ref_number} to ${newStatus}`
     );
-    emitOrdersUpdate(io);
+    await emitOrdersUpdate(io, pool);
     res.json({ message: `Status updated to ${newStatus}` });
   } catch (err) {
     console.error(
       `❌ Error updating status for order ${order_ref_number}:`,
-      err
+      err.message
     );
-    return res.status(500).json({ error: "Database error" });
+    res.status(500).json({ error: "Database error: " + err.message });
   }
 });
 
@@ -463,14 +463,14 @@ app.post("/api/order/:order_ref_number/update-delivery", async (req, res) => {
     console.log(
       `✅ Updated delivery time for order ${order_ref_number} to ${newDeliveryTime}`
     );
-    emitOrdersUpdate(io);
+    await emitOrdersUpdate(io, pool);
     res.json({ message: `Delivery time updated to ${newDeliveryTime}` });
   } catch (err) {
     console.error(
       `❌ Error updating delivery time for order ${order_ref_number}:`,
-      err
+      err.message
     );
-    return res.status(500).json({ error: "Database error" });
+    res.status(500).json({ error: "Database error: " + err.message });
   }
 });
 
@@ -534,7 +534,7 @@ app.get("/api/sendMessage/:phone", async (req, res) => {
     }
   } catch (error) {
     console.error("Error in manual send endpoint:", error.message);
-    res.status(500).json({ error: "Internal server error." });
+    res.status(500).json({ error: "Internal server error: " + error.message });
   } finally {
     if (connection) connection.release();
   }
@@ -551,8 +551,8 @@ initializeWhatsAppClient()
     processNewShopifyOrders();
     setInterval(processNewShopifyOrders, POLL_INTERVAL);
     setInterval(checkForResendMessages, RESEND_CHECK_INTERVAL);
-    setInterval(syncShopifyOrders, 5 * 60 * 1000);
-    setInterval(decrementDeliveryTimes, 30 * 1000);
+    setInterval(() => syncShopifyOrders(pool), 5 * 60 * 1000);
+    setInterval(() => decrementDeliveryTimes(pool), 30 * 1000);
   })
   .catch((err) => {
     console.error("Fatal: could not initialize WhatsApp client", err);
