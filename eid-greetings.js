@@ -7,7 +7,7 @@ const path = require("path");
 const express = require("express");
 const mysql = require("mysql2/promise");
 const axios = require("axios");
-const { Client, RemoteAuth } = require("whatsapp-web.js");
+const { Client, RemoteAuth, LocalAuth } = require("whatsapp-web.js");
 const { MysqlStore } = require("wwebjs-mysql");
 const qrcode = require("qrcode-terminal");
 const http = require("http");
@@ -120,17 +120,28 @@ const store = new MysqlStore({ pool, tableInfo });
 
 // WhatsApp client initialization
 let waClient = null;
+let isClientReady = false;
+let authFailureCount = 0;
+const MAX_AUTH_ATTEMPTS = 3;
 
-async function initializeWhatsAppClient() {
-  if (waClient) return;
+async function initializeWhatsAppClient(useRemoteAuth = true) {
+  if (waClient && isClientReady) return;
   return new Promise((resolve, reject) => {
-    console.log("🔄 Initializing WhatsApp client...");
+    console.log(
+      `🔄 Initializing WhatsApp client (RemoteAuth: ${useRemoteAuth})...`
+    );
+
+    // Choose authentication strategy
+    const authStrategy = useRemoteAuth
+      ? new RemoteAuth({
+          store,
+          clientId: "order-confirmation-sender",
+          backupSyncIntervalMs: 300000, // Sync session every 5 minutes
+        })
+      : new LocalAuth({ clientId: "order-confirmation-sender" });
+
     waClient = new Client({
-      authStrategy: new RemoteAuth({
-        store,
-        clientId: "order-confirmation-sender",
-        backupSyncIntervalMs: 300000, // Sync session every 5 minutes
-      }),
+      authStrategy,
       puppeteer: {
         headless: process.env.HEADLESS_MODE !== "false",
         args: [
@@ -141,31 +152,82 @@ async function initializeWhatsAppClient() {
           "--no-first-run",
           "--disable-gpu",
           "--disable-extensions",
+          "--no-zygote", // Improve stability in low-memory environments
+          "--single-process", // Reduce memory footprint
         ],
+        executablePath: process.env.CHROMIUM_PATH || undefined, // Optional: Specify path if using custom Chromium
       },
     });
 
     waClient.on("qr", (qr) => {
-      console.log("🔑 QR code generated for authentication.");
-      qrcode.generate(qr, { small: false, margin: 2 });
+      console.log(
+        "🔑 QR code generated for authentication. Scan the QR code below:"
+      );
+      qrcode.generate(qr, { small: false, margin: 2 }, (code) => {
+        console.log(code); // Print QR code to terminal
+      });
     });
 
     waClient.on("authenticated", () => {
       console.log("✅ WhatsApp authenticated successfully.");
+      authFailureCount = 0; // Reset failure counter
     });
 
-    waClient.on("auth_failure", (msg) => {
+    waClient.on("auth_failure", async (msg) => {
       console.error("❌ WhatsApp authentication failed:", msg);
+      isClientReady = false;
+      authFailureCount++;
+      console.log(`🔄 Authentication failure count: ${authFailureCount}`);
+
+      if (authFailureCount >= MAX_AUTH_ATTEMPTS && useRemoteAuth) {
+        console.log(
+          "⚠️ Max authentication attempts reached. Falling back to QR code authentication..."
+        );
+        // Clear session data from MySQL
+        try {
+          await pool.query("DELETE FROM wsp_sessions WHERE session_name = ?", [
+            "order-confirmation-sender",
+          ]);
+          console.log("✅ Cleared session data from database.");
+        } catch (err) {
+          console.error("❌ Error clearing session data:", err.message);
+        }
+        // Reinitialize with LocalAuth (QR code)
+        await initializeWhatsAppClient(false);
+      }
       reject(new Error("WhatsApp auth failure"));
     });
 
     waClient.on("ready", () => {
       console.log("🚀 WhatsApp client is ready.");
+      isClientReady = true;
       resolve();
     });
 
-    waClient.initialize();
+    waClient.on("disconnected", (reason) => {
+      console.log(`❌ WhatsApp client disconnected: ${reason}`);
+      isClientReady = false;
+      // Attempt to reinitialize
+      setTimeout(() => initializeWhatsAppClient(useRemoteAuth), 5000);
+    });
+
+    waClient.initialize().catch((err) => {
+      console.error("❌ Failed to initialize WhatsApp client:", err.message);
+      isClientReady = false;
+      reject(err);
+    });
   });
+}
+
+// Utility: Wait for client readiness with timeout
+async function waitForClientReady(timeoutMs = 30000) {
+  const startTime = Date.now();
+  while (!isClientReady && Date.now() - startTime < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  if (!isClientReady) {
+    throw new Error("WhatsApp client not ready");
+  }
 }
 
 // Utility: Convert phone number
@@ -177,75 +239,153 @@ function convertPhone(phone) {
 }
 
 // Send order confirmation message
-async function sendOrderConfirmationMessage(order) {
-  try {
-    let phone = order.phone.trim();
-    phone = convertPhone(phone);
-    const waId = `${phone}@c.us`;
-    const contact = {
-      id: { user: phone, _serialized: waId },
-      name: order.customer_name || "Customer",
-    };
-    const messageText = MESSAGE_TEXT_TEMPLATE(order);
-    console.log(`📤 Sending confirmation message to ${contact.id.user}...`);
-    const sentMessage = await waClient.sendMessage(
-      contact.id._serialized,
-      messageText
-    );
-    if (sentMessage) {
-      console.log(`✅ Message sent to ${contact.id.user}`);
-      await updateOrderMessageSent(order.order_ref_number);
-      listenForOrderReply(contact, order);
-      return true;
+async function sendOrderConfirmationMessage(order, retries = 3) {
+  let attempt = 1;
+  while (attempt <= retries) {
+    try {
+      await waitForClientReady();
+      let phone = order.phone.trim();
+      phone = convertPhone(phone);
+      const waId = `${phone}@c.us`;
+      const contact = {
+        id: { user: phone, _serialized: waId },
+        name: order.customer_name || "Customer",
+      };
+      const messageText = MESSAGE_TEXT_TEMPLATE(order);
+      console.log(
+        `📤 Sending confirmation message to ${contact.id.user} (Attempt ${attempt})...`
+      );
+      const sentMessage = await waClient.sendMessage(
+        contact.id._serialized,
+        messageText
+      );
+      if (sentMessage) {
+        console.log(`✅ Message sent to ${contact.id.user}`);
+        await updateOrderMessageSent(order.order_ref_number);
+        listenForOrderReply(contact, order);
+        return true;
+      }
+      console.log(`❌ Message sending failed for ${contact.id.user}`);
+      return false;
+    } catch (error) {
+      console.error(
+        `❌ Error sending confirmation message (Attempt ${attempt}):`,
+        error.message
+      );
+      if (attempt === retries) {
+        console.error(`❌ Max retries reached for ${order.order_ref_number}`);
+        return false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+      if (
+        error.message.includes("WidFactory") ||
+        error.message.includes("disconnected")
+      ) {
+        console.log("🔄 Reinitializing WhatsApp client due to error...");
+        isClientReady = false;
+        await initializeWhatsAppClient();
+      }
     }
-    console.log(`❌ Message sending failed for ${contact.id.user}`);
-    return false;
-  } catch (error) {
-    console.error("❌ Error sending confirmation message:", error.message);
-    return false;
+    attempt++;
   }
+  return false;
 }
 
-// Send delivery update message
-async function sendDeliveryUpdateMessage(order, newDeliveryTime, reason) {
-  try {
-    let phone = order.phone.trim();
-    phone = convertPhone(phone);
-    const waId = `${phone}@c.us`;
-    const messageText = DELIVERY_UPDATE_MESSAGE(order, newDeliveryTime, reason);
-    console.log(`📤 Sending delivery update message to ${phone}...`);
-    const sentMessage = await waClient.sendMessage(waId, messageText);
-    if (sentMessage) {
-      console.log(`✅ Delivery update message sent to ${phone}`);
-      return true;
+// Send delivery update message with retry logic
+async function sendDeliveryUpdateMessage(
+  order,
+  newDeliveryTime,
+  reason,
+  retries = 3
+) {
+  let attempt = 1;
+  while (attempt <= retries) {
+    try {
+      await waitForClientReady();
+      let phone = order.phone.trim();
+      phone = convertPhone(phone);
+      const waId = `${phone}@c.us`;
+      const messageText = DELIVERY_UPDATE_MESSAGE(
+        order,
+        newDeliveryTime,
+        reason
+      );
+      console.log(
+        `📤 Sending delivery update message to ${phone} (Attempt ${attempt})...`
+      );
+      const sentMessage = await waClient.sendMessage(waId, messageText);
+      if (sentMessage) {
+        console.log(`✅ Delivery update message sent to ${phone}`);
+        return true;
+      }
+      console.log(`❌ Delivery update message failed for ${phone}`);
+      return false;
+    } catch (error) {
+      console.error(
+        `❌ Error sending delivery update message (Attempt ${attempt}):`,
+        error.message
+      );
+      if (attempt === retries) {
+        console.error(`❌ Max retries reached for ${order.order_ref_number}`);
+        return false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+      if (
+        error.message.includes("WidFactory") ||
+        error.message.includes("disconnected")
+      ) {
+        console.log("🔄 Reinitializing WhatsApp client due to error...");
+        isClientReady = false;
+        await initializeWhatsAppClient();
+      }
     }
-    console.log(`❌ Delivery update message failed for ${phone}`);
-    return false;
-  } catch (error) {
-    console.error("❌ Error sending delivery update message:", error.message);
-    return false;
+    attempt++;
   }
+  return false;
 }
 
 // Send cancellation message
-async function sendCancellationMessage(order, reason) {
-  try {
-    let phone = order.phone.trim();
-    phone = convertPhone(phone);
-    const waId = `${phone}@c.us`;
-    const messageText = CANCELLATION_MESSAGE(order, reason);
-    console.log(`📤 Sending cancellation message to ${phone}...`);
-    const sentMessage = await waClient.sendMessage(waId, messageText);
-    if (sentMessage) {
-      console.log(`✅ Cancellation message sent to ${phone}`);
-      return true;
+async function sendCancellationMessage(order, reason, retries = 3) {
+  let attempt = 1;
+  while (attempt <= retries) {
+    try {
+      await waitForClientReady();
+      let phone = order.phone.trim();
+      phone = convertPhone(phone);
+      const waId = `${phone}@c.us`;
+      const messageText = CANCELLATION_MESSAGE(order, reason);
+      console.log(
+        `📤 Sending cancellation message to ${phone} (Attempt ${attempt})...`
+      );
+      const sentMessage = await waClient.sendMessage(waId, messageText);
+      if (sentMessage) {
+        console.log(`✅ Cancellation message sent to ${phone}`);
+        return true;
+      }
+      console.log(`❌ Cancellation message failed for ${phone}`);
+      return false;
+    } catch (error) {
+      console.error(
+        `❌ Error sending cancellation message (Attempt ${attempt}):`,
+        error.message
+      );
+      if (attempt === retries) {
+        console.error(`❌ Max retries reached for ${order.order_ref_number}`);
+        return false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+      if (
+        error.message.includes("WidFactory") ||
+        error.message.includes("disconnected")
+      ) {
+        console.log("🔄 Reinitializing WhatsApp client due to error...");
+        isClientReady = false;
+        await initializeWhatsAppClient();
+      }
     }
-    console.log(`❌ Cancellation message failed for ${phone}`);
-    return false;
-  } catch (error) {
-    console.error("❌ Error sending cancellation message:", error.message);
-    return false;
+    attempt++;
   }
+  return false;
 }
 
 // Listen for order reply
