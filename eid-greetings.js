@@ -8,13 +8,12 @@ const express = require("express");
 const mysql = require("mysql2/promise");
 const axios = require("axios");
 const { Client, RemoteAuth, LocalAuth } = require("whatsapp-web.js");
-const { MysqlStore } = require("wwebjs-mysql");
+const { M彼此: MysqlStore } = require("wwebjs-mysql");
 const qrcode = require("qrcode-terminal");
 const http = require("http");
 const { Server } = require("socket.io");
 const {
   emitOrdersUpdate,
-  syncShopifyOrders,
   decrementDeliveryTimes,
 } = require("./orderPortalSystem/index.js");
 
@@ -595,6 +594,183 @@ async function processNewShopifyOrders() {
   }
 }
 
+// Full Shopify-MySQL sync with updates and deletions
+async function syncShopifyOrders(pool) {
+  console.log("🔄 Starting Shopify-MySQL sync process...");
+  let connection;
+  try {
+    connection = await pool.getConnection();
+
+    // Fetch Shopify orders
+    console.log("📡 Fetching Shopify orders...");
+    const shopifyOrders = await fetchShopifyOrders();
+    if (!shopifyOrders.length) {
+      console.log("⚠️ No orders fetched from Shopify. Skipping sync.");
+      return;
+    }
+
+    // Map Shopify orders to match MySQL schema
+    const formattedOrders = shopifyOrders.map((order) => {
+      let customerName = "Guest";
+      let city = "Unknown";
+      let phone = "Unknown";
+
+      if (order.customer && order.customer.first_name) {
+        customerName = `${order.customer.first_name} ${
+          order.customer.last_name || ""
+        }`.trim();
+      } else if (order.shipping_address && order.shipping_address.first_name) {
+        customerName = `${order.shipping_address.first_name} ${
+          order.shipping_address.last_name || ""
+        }`.trim();
+      }
+
+      if (order.shipping_address && order.shipping_address.city) {
+        city = order.shipping_address.city;
+      }
+
+      if (order.shipping_address && order.shipping_address.phone) {
+        phone = order.shipping_address.phone;
+      }
+
+      return {
+        order_ref_number: parseInt(order.order_number),
+        order_ref: order.id,
+        customer_name: customerName,
+        city,
+        phone,
+        amount: parseFloat(order.total_price),
+      };
+    });
+
+    console.log(`✅ Fetched ${formattedOrders.length} orders from Shopify.`);
+
+    // Fetch existing orders from MySQL
+    console.log("📊 Fetching existing orders from MySQL...");
+    const [existingOrders] = await connection.query(
+      "SELECT order_ref_number, order_ref, customer_name, city, phone, amount FROM testingTrialAcc"
+    );
+    console.log(`✅ Fetched ${existingOrders.length} orders from MySQL.`);
+
+    // Create sets for comparison
+    const shopifyOrderNumbers = new Set(
+      formattedOrders.map((order) => order.order_ref_number)
+    );
+    const mysqlOrderNumbers = new Set(
+      existingOrders.map((order) => order.order_ref_number)
+    );
+
+    // Identify orders to delete (in MySQL but not in Shopify)
+    const ordersToDelete = [...mysqlOrderNumbers].filter(
+      (orderNumber) => !shopifyOrderNumbers.has(orderNumber)
+    );
+
+    // Process deletions
+    if (ordersToDelete.length > 0) {
+      console.log(`🗑️ Found ${ordersToDelete.length} orders to delete...`);
+      for (const orderNumber of ordersToDelete) {
+        console.log(`🗑️ Removing order #${orderNumber} from database...`);
+        await connection.query(
+          "DELETE FROM testingTrialAcc WHERE order_ref_number = ?",
+          [orderNumber]
+        );
+        console.log(`✅ Removed order #${orderNumber}.`);
+      }
+    } else {
+      console.log("✅ No orders to delete.");
+    }
+
+    // Process each Shopify order (insertions and updates)
+    const existingOrderMap = new Map(
+      existingOrders.map((order) => [order.order_ref_number, order])
+    );
+
+    for (const order of formattedOrders) {
+      console.log(`🔍 Processing order #${order.order_ref_number}...`);
+      const existingOrder = existingOrderMap.get(order.order_ref_number);
+
+      if (existingOrder) {
+        // Check for differences
+        const changes = [];
+        if (existingOrder.order_ref !== order.order_ref) {
+          changes.push(
+            `order_ref changed from '${existingOrder.order_ref}' to '${order.order_ref}'`
+          );
+        }
+        if (existingOrder.customer_name !== order.customer_name) {
+          changes.push(
+            `customer_name changed from '${existingOrder.customer_name}' to '${order.customer_name}'`
+          );
+        }
+        if (existingOrder.city !== order.city) {
+          changes.push(
+            `city changed from '${existingOrder.city}' to '${order.city}'`
+          );
+        }
+        if (existingOrder.phone !== order.phone) {
+          changes.push(
+            `phone changed from '${existingOrder.phone}' to '${order.phone}'`
+          );
+        }
+        if (existingOrder.amount !== order.amount) {
+          changes.push(
+            `amount changed from '${existingOrder.amount}' to '${order.amount}'`
+          );
+        }
+
+        if (changes.length > 0) {
+          console.log(`🛠️ Updating order #${order.order_ref_number}...`);
+          changes.forEach((change) => console.log(`  ↳ ${change}`));
+          await connection.query(
+            `UPDATE testingTrialAcc 
+             SET order_ref = ?, customer_name = ?, city = ?, phone = ?, amount = ?
+             WHERE order_ref_number = ?`,
+            [
+              order.order_ref,
+              order.customer_name,
+              order.city,
+              order.phone,
+              order.amount,
+              order.order_ref_number,
+            ]
+          );
+          console.log(`✅ Updated order #${order.order_ref_number}.`);
+        } else {
+          console.log(`✅ Order #${order.order_ref_number} is up-to-date.`);
+        }
+      } else {
+        // Insert new order
+        console.log(`➕ Inserting new order #${order.order_ref_number}...`);
+        console.log(
+          `  ↳ New order details: order_ref='${order.order_ref}', customer_name='${order.customer_name}', city='${order.city}', phone='${order.phone}', amount='${order.amount}'`
+        );
+        await connection.query(
+          `INSERT INTO testingTrialAcc 
+           (order_ref_number, order_ref, customer_name, city, phone, amount, status, delivery_time, messageSent, lastMessageSent) 
+           VALUES (?, ?, ?, ?, ?, ?, 'no', 4, 'no', 0)`,
+          [
+            order.order_ref_number,
+            order.order_ref,
+            order.customer_name,
+            order.city,
+            order.phone,
+            order.amount,
+          ]
+        );
+        console.log(`✅ Inserted new order #${order.order_ref_number}.`);
+        // Trigger WhatsApp confirmation for new orders
+        sendOrderConfirmationMessage(order);
+      }
+    }
+
+    console.log("🎉 Shopify-MySQL sync completed successfully!");
+  } catch (err) {
+    console.error("❌ Error during Shopify-MySQL sync:", err.message);
+  } finally {
+    if (connection) connection.release();
+  }
+}
+
 // Check for resend messages
 async function checkForResendMessages() {
   let connection;
@@ -872,7 +1048,7 @@ initializeWhatsAppClient()
     processNewShopifyOrders();
     setInterval(processNewShopifyOrders, POLL_INTERVAL);
     setInterval(checkForResendMessages, RESEND_CHECK_INTERVAL);
-    setInterval(() => syncShopifyOrders(pool), 5 * 60 * 1000);
+    setInterval(() => syncShopifyOrders(pool), 10 * 60 * 1000); // Changed to 10 minutes
     setInterval(() => decrementDeliveryTimes(pool, io), 30 * 1000);
   })
   .catch((err) => {
