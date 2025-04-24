@@ -55,7 +55,7 @@ const DB_CONFIG = {
   queueLimit: 0,
 };
 
-const BASE_URL = "https://wa-order-portal.onrender.com/";
+const BASE_URL = "https://wa-order-portal.onrender.com";
 
 // Message Templates
 const MESSAGE_TEXT_TEMPLATE = (order) => {
