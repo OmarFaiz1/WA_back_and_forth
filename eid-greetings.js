@@ -1036,6 +1036,11 @@ io.on("connection", (socket) => {
   });
 });
 
+// Health check endpoint
+app.get("/health", async (req, res) => {
+  res.json({ status: "healthy" });
+});
+
 // Start server
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Server running on port ${PORT}`);
