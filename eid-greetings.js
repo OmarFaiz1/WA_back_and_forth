@@ -173,28 +173,44 @@ async function initializeWhatsAppClient(useRemoteAuth = true, attempt = 1) {
     });
 
     waClient.on("auth_failure", async (msg) => {
-      console.error(`❌ WhatsApp authentication failed (Attempt ${attempt}):`, msg);
-      authFailureCount++;
+      console.error(`❌ WhatsApp authentication failed (Attempt ${attempt}): ${msg}`);
       isClientReady = false;
+      authFailureCount++;
 
       if (authFailureCount < MAX_AUTH_ATTEMPTS && useRemoteAuth) {
         console.log(`🔄 Retrying RemoteAuth (Attempt ${attempt + 1})...`);
-        try {
-          await waClient.destroy();
-          await initializeWhatsAppClient(true, attempt + 1);
-          resolve();
-        } catch (err) {
-          reject(err);
+        if (waClient) {
+          try {
+            await waClient.destroy();
+          } catch (err) {
+            console.error(`❌ Error destroying client: ${err.message}`);
+          }
         }
+        waClient = null;
+        setTimeout(async () => {
+          try {
+            await initializeWhatsAppClient(true, attempt + 1);
+            resolve();
+          } catch (err) {
+            reject(err);
+          }
+        }, 2000);
       } else {
         console.log("⚠️ Max authentication attempts reached or using LocalAuth. Falling back to QR code...");
+        if (waClient) {
+          try {
+            await waClient.destroy();
+          } catch (err) {
+            console.error(`❌ Error destroying client: ${err.message}`);
+          }
+        }
+        waClient = null;
         try {
           await pool.query("DELETE FROM wsp_sessions WHERE session_name = ?", [
             "order-confirmation-sender",
           ]);
           console.log("✅ Cleared session data from database.");
-          await waClient.destroy();
-          await initializeWhatsAppClient(false, 1); // Switch to LocalAuth
+          await initializeWhatsAppClient(false, 1);
           resolve();
         } catch (err) {
           reject(err);
@@ -214,28 +230,54 @@ async function initializeWhatsAppClient(useRemoteAuth = true, attempt = 1) {
       setTimeout(() => initializeWhatsAppClient(useRemoteAuth, attempt), 5000);
     });
 
-    waClient.initialize().catch((err) => {
-      console.error(`❌ Failed to initialize WhatsApp client (Attempt ${attempt}):`, err.message);
-      isClientReady = false;
+    waClient
+      .initialize()
+      .catch(async (err) => {
+        console.error(`❌ Failed to initialize WhatsApp client (Attempt ${attempt}): ${err.message}`);
+        isClientReady = false;
 
-      if (attempt < MAX_AUTH_ATTEMPTS && useRemoteAuth) {
-        console.log(`🔄 Retrying RemoteAuth (Attempt ${attempt + 1})...`);
-        setTimeout(() => initializeWhatsAppClient(true, attempt + 1), 2000).then(resolve).catch(reject);
-      } else if (useRemoteAuth) {
-        console.log("⚠️ Max RemoteAuth attempts reached. Falling back to QR code...");
-        pool.query("DELETE FROM wsp_sessions WHERE session_name = ?", [
-          "order-confirmation-sender",
-        ])
-          .then(() => {
+        if (attempt < MAX_AUTH_ATTEMPTS && useRemoteAuth) {
+          console.log(`🔄 Retrying RemoteAuth (Attempt ${attempt + 1})...`);
+          if (waClient) {
+            try {
+              await waClient.destroy();
+            } catch (err) {
+              console.error(`❌ Error destroying client: ${err.message}`);
+            }
+          }
+          waClient = null;
+          setTimeout(async () => {
+            try {
+              await initializeWhatsAppClient(true, attempt + 1);
+              resolve();
+            } catch (err) {
+              reject(err);
+            }
+          }, 2000);
+        } else if (useRemoteAuth) {
+          console.log("⚠️ Max RemoteAuth attempts reached. Falling back to QR code...");
+          if (waClient) {
+            try {
+              await waClient.destroy();
+            } catch (err) {
+              console.error(`❌ Error destroying client: ${err.message}`);
+            }
+          }
+          waClient = null;
+          try {
+            await pool.query("DELETE FROM wsp_sessions WHERE session_name = ?", [
+              "order-confirmation-sender",
+            ]);
             console.log("✅ Cleared session data from database.");
-            return initializeWhatsAppClient(false, 1); // Switch to LocalAuth
-          })
-          .then(resolve)
-          .catch(reject);
-      } else {
-        reject(err);
-      }
-    });
+            await initializeWhatsAppClient(false, 1);
+            resolve();
+          } catch (err) {
+            reject(err);
+          }
+        } else {
+          reject(err);
+        }
+      });
 
     // Check readiness after authentication
     setTimeout(async () => {
@@ -243,21 +285,37 @@ async function initializeWhatsAppClient(useRemoteAuth = true, attempt = 1) {
         console.warn(`⚠️ WhatsApp client not ready after 60s (Attempt ${attempt})`);
         if (attempt < MAX_AUTH_ATTEMPTS && useRemoteAuth) {
           console.log(`🔄 Retrying RemoteAuth (Attempt ${attempt + 1})...`);
-          try {
-            await waClient.destroy();
-            await initializeWhatsAppClient(true, attempt + 1);
-            resolve();
-          } catch (err) {
-            reject(err);
+          if (waClient) {
+            try {
+              await waClient.destroy();
+            } catch (err) {
+              console.error(`❌ Error destroying client: ${err.message}`);
+            }
           }
+          waClient = null;
+          setTimeout(async () => {
+            try {
+              await initializeWhatsAppClient(true, attempt + 1);
+              resolve();
+            } catch (err) {
+              reject(err);
+            }
+          }, 2000);
         } else if (useRemoteAuth) {
           console.log("⚠️ Max RemoteAuth attempts reached. Falling back to QR code...");
+          if (waClient) {
+            try {
+              await waClient.destroy();
+            } catch (err) {
+              console.error(`❌ Error destroying client: ${err.message}`);
+            }
+          }
+          waClient = null;
           try {
             await pool.query("DELETE FROM wsp_sessions WHERE session_name = ?", [
               "order-confirmation-sender",
             ]);
             console.log("✅ Cleared session data from database.");
-            await waClient.destroy();
             await initializeWhatsAppClient(false, 1);
             resolve();
           } catch (err) {
@@ -297,10 +355,11 @@ function convertPhone(phone) {
 
 // Send order confirmation message
 async function sendOrderConfirmationMessage(order, retries = 3) {
+  console.log(`📩 Preparing to send confirmation message for order ${order.order_ref_number}`);
   let attempt = 1;
   while (attempt <= retries) {
     try {
-      console.log(`🔍 Checking WhatsApp client for order ${order.order_ref_number} confirmation`);
+      console.log(`🔍 Checking WhatsApp client for order ${order.order_ref_number} confirmation (Attempt ${attempt})`);
       await waitForClientReady();
       let phone = order.phone.trim();
       console.log(`📱 Processing phone number for order ${order.order_ref_number}: ${phone}`);
@@ -329,22 +388,37 @@ async function sendOrderConfirmationMessage(order, retries = 3) {
       return false;
     } catch (error) {
       console.error(
-        `❌ Error sending confirmation message for order ${order.order_ref_number} (Attempt ${attempt}):`,
-        error.message
+        `❌ Error sending confirmation message for order ${order.order_ref_number} (Attempt ${attempt}): ${error.message}`
       );
       if (attempt === retries) {
         console.error(`❌ Max retries reached for order ${order.order_ref_number}`);
-        if (error.message.includes("WhatsApp client not ready")) {
+        if (error.message.includes("WhatsApp client not ready") || error.message.includes("Target closed")) {
           console.log("🔄 Forcing reinitialization with QR code due to persistent readiness failure...");
           isClientReady = false;
+          if (waClient) {
+            try {
+              await waClient.destroy();
+            } catch (err) {
+              console.error(`❌ Error destroying client: ${err.message}`);
+            }
+          }
+          waClient = null;
           await initializeWhatsAppClient(false, 1);
           return false;
         }
       }
       await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
-      if (error.message.includes("WidFactory") || error.message.includes("disconnected")) {
+      if (error.message.includes("WidFactory") || error.message.includes("disconnected") || error.message.includes("Target closed")) {
         console.log("🔄 Reinitializing WhatsApp client due to error...");
         isClientReady = false;
+        if (waClient) {
+          try {
+            await waClient.destroy();
+          } catch (err) {
+            console.error(`❌ Error destroying client: ${err.message}`);
+          }
+        }
+        waClient = null;
         await initializeWhatsAppClient();
       }
     }
@@ -382,22 +456,37 @@ async function sendDeliveryUpdateMessage(order, newDeliveryTime, reason, retries
       return false;
     } catch (error) {
       console.error(
-        `❌ Error sending delivery update message for order ${order.order_ref_number} (Attempt ${attempt}):`,
-        error.message
+        `❌ Error sending delivery update message for order ${order.order_ref_number} (Attempt ${attempt}): ${error.message}`
       );
       if (attempt === retries) {
         console.error(`❌ Max retries reached for order ${order.order_ref_number}`);
-        if (error.message.includes("WhatsApp client not ready")) {
+        if (error.message.includes("WhatsApp client not ready") || error.message.includes("Target closed")) {
           console.log("🔄 Forcing reinitialization with QR code due to persistent readiness failure...");
           isClientReady = false;
+          if (waClient) {
+            try {
+              await waClient.destroy();
+            } catch (err) {
+              console.error(`❌ Error destroying client: ${err.message}`);
+            }
+          }
+          waClient = null;
           await initializeWhatsAppClient(false, 1);
           return false;
         }
       }
       await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
-      if (error.message.includes("WidFactory") || error.message.includes("disconnected")) {
+      if (error.message.includes("WidFactory") || error.message.includes("disconnected") || error.message.includes("Target closed")) {
         console.log("🔄 Reinitializing WhatsApp client due to error...");
         isClientReady = false;
+        if (waClient) {
+          try {
+            await waClient.destroy();
+          } catch (err) {
+            console.error(`❌ Error destroying client: ${err.message}`);
+          }
+        }
+        waClient = null;
         await initializeWhatsAppClient();
       }
     }
@@ -436,22 +525,37 @@ async function sendCancellationMessage(order, reason, retries = 3) {
       return false;
     } catch (error) {
       console.error(
-        `❌ Error sending cancellation message for order ${order.order_ref_number} (Attempt ${attempt}):`,
-        error.message
+        `❌ Error sending cancellation message for order ${order.order_ref_number} (Attempt ${attempt}): ${error.message}`
       );
       if (attempt === retries) {
         console.error(`❌ Max retries reached for order ${order.order_ref_number}`);
-        if (error.message.includes("WhatsApp client not ready")) {
+        if (error.message.includes("WhatsApp client not ready") || error.message.includes("Target closed")) {
           console.log("🔄 Forcing reinitialization with QR code due to persistent readiness failure...");
           isClientReady = false;
+          if (waClient) {
+            try {
+              await waClient.destroy();
+            } catch (err) {
+              console.error(`❌ Error destroying client: ${err.message}`);
+            }
+          }
+          waClient = null;
           await initializeWhatsAppClient(false, 1);
           return false;
         }
       }
       await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
-      if (error.message.includes("WidFactory") || error.message.includes("disconnected")) {
+      if (error.message.includes("WidFactory") || error.message.includes("disconnected") || error.message.includes("Target closed")) {
         console.log("🔄 Reinitializing WhatsApp client due to error...");
         isClientReady = false;
+        if (waClient) {
+          try {
+            await waClient.destroy();
+          } catch (err) {
+            console.error(`❌ Error destroying client: ${err.message}`);
+          }
+        }
+        waClient = null;
         await initializeWhatsAppClient();
       }
     }
@@ -498,8 +602,7 @@ async function updateOrderStatusInDB(orderRefNumber, newStatus) {
     );
   } catch (error) {
     console.error(
-      `❌ Error updating order ${orderRefNumber} status in DB:`,
-      error.message
+      `❌ Error updating order ${orderRefNumber} status in DB: ${error.message}`
     );
   } finally {
     if (connection) connection.release();
@@ -518,8 +621,7 @@ async function updateOrderMessageSent(orderRefNumber) {
     console.log(`✅ Marked message sent for order ${orderRefNumber}`);
   } catch (error) {
     console.error(
-      `❌ Error updating messageSent for order ${orderRefNumber}:`,
-      error.message
+      `❌ Error updating messageSent for order ${orderRefNumber}: ${error.message}`
     );
   } finally {
     if (connection) connection.release();
@@ -538,8 +640,7 @@ async function incrementLastMessageCounter(orderRefNumber) {
     console.log(`✅ Incremented lastMessageSent for order ${orderRefNumber}`);
   } catch (error) {
     console.error(
-      `❌ Error incrementing lastMessageSent for order ${orderRefNumber}:`,
-      error.message
+      `❌ Error incrementing lastMessageSent for order ${orderRefNumber}: ${error.message}`
     );
   } finally {
     if (connection) connection.release();
@@ -565,13 +666,13 @@ async function updateOrderStatusViaAPI(orderRefNumber, status) {
       }
     );
     console.log(
-      `✅ Order ${orderRefNumber} status updated via API:`,
-      response.data
+      `✅ Order ${orderRefNumber} status updated via API: ${JSON.stringify(response.data)}`
     );
   } catch (error) {
     console.error(
-      `❌ Error updating status for order ${orderRefNumber} via API:`,
-      error.response ? error.response.data : error.message
+      `❌ Error updating status for order ${orderRefNumber} via API: ${
+        error.response ? JSON.stringify(error.response.data) : error.message
+      }`
     );
   }
 }
@@ -595,7 +696,7 @@ async function fetchShopifyOrders() {
     console.log("ℹ️ No orders found in Shopify response");
     return [];
   } catch (error) {
-    console.error("❌ Error fetching Shopify orders:", error.message);
+    console.error(`❌ Error fetching Shopify orders: ${error.message}`);
     return [];
   }
 }
@@ -628,9 +729,9 @@ async function processNewShopifyOrders() {
             ? order.shipping_address.city
             : "Unknown",
           phone:
-            order.shipping_address && order.shipping_address.phone
+            order.shipping_address && order.shipping_address.phone && order.shipping_address.phone.match(/^\d{10,12}$/)
               ? order.shipping_address.phone
-              : "0000000000",
+              : null,
           amount: order.total_price,
           status: "no",
           delivery_time: 4,
@@ -655,13 +756,17 @@ async function processNewShopifyOrders() {
           ]
         );
         console.log(`✅ Inserted new order ${orderRefNumber} into DB`);
-        sendOrderConfirmationMessage(insertData);
+        if (insertData.phone) {
+          sendOrderConfirmationMessage(insertData);
+        } else {
+          console.warn(`⚠️ Skipping confirmation message for order ${orderRefNumber}: Invalid phone number`);
+        }
       } else {
         console.log(`ℹ️ Order ${orderRefNumber} already exists in DB`);
       }
     }
   } catch (error) {
-    console.error("❌ Error processing Shopify orders:", error.message);
+    console.error(`❌ Error processing Shopify orders: ${error.message}`);
   } finally {
     if (connection) connection.release();
   }
@@ -682,7 +787,7 @@ async function syncShopifyOrders(pool) {
     const formattedOrders = shopifyOrders.map((order) => {
       let customerName = "Guest";
       let city = "Unknown";
-      let phone = "Unknown";
+      let phone = null;
       if (order.customer && order.customer.first_name) {
         customerName = `${order.customer.first_name} ${
           order.customer.last_name || ""
@@ -695,7 +800,7 @@ async function syncShopifyOrders(pool) {
       if (order.shipping_address && order.shipping_address.city) {
         city = order.shipping_address.city;
       }
-      if (order.shipping_address && order.shipping_address.phone) {
+      if (order.shipping_address && order.shipping_address.phone && order.shipping_address.phone.match(/^\d{10,12}$/)) {
         phone = order.shipping_address.phone;
       }
       return {
@@ -807,12 +912,16 @@ async function syncShopifyOrders(pool) {
           ]
         );
         console.log(`✅ Inserted new order #${order.order_ref_number}.`);
-        sendOrderConfirmationMessage(order);
+        if (order.phone) {
+          sendOrderConfirmationMessage(order);
+        } else {
+          console.warn(`⚠️ Skipping confirmation message for order ${order.order_ref_number}: Invalid phone number`);
+        }
       }
     }
     console.log("🎉 Shopify-MySQL sync completed successfully!");
   } catch (err) {
-    console.error("❌ Error during Shopify-MySQL sync:", err.message);
+    console.error(`❌ Error during Shopify-MySQL sync: ${err.message}`);
   } finally {
     if (connection) connection.release();
   }
@@ -843,7 +952,7 @@ async function checkForResendMessages() {
     }
     console.log("✅ Resend check completed");
   } catch (error) {
-    console.error("❌ Error checking orders for resend:", error.message);
+    console.error(`❌ Error checking orders for resend: ${error.message}`);
   } finally {
     if (connection) connection.release();
   }
@@ -878,8 +987,8 @@ app.get("/api/orders", async (req, res) => {
     console.log(`✅ Fetched ${results.length} orders from DB`);
     res.json({ orders: results });
   } catch (err) {
-    console.error("❌ Error fetching orders:", err.message);
-    res.status(500).json({ error: "Database error: " + err.message });
+    console.error(`❌ Error fetching orders: ${err.message}`);
+    res.status(500).json({ error: `Database error: ${err.message}` });
   }
 });
 
@@ -900,8 +1009,8 @@ app.get("/api/order/:order_ref_number", async (req, res) => {
     console.log(`✅ Fetched details for order ${order_ref_number}`);
     res.json({ order: results[0] });
   } catch (err) {
-    console.error("❌ Error fetching order details:", err.message);
-    res.status(500).json({ error: "Database error: " + err.message });
+    console.error(`❌ Error fetching order details: ${err.message}`);
+    res.status(500).json({ error: `Database error: ${err.message}` });
   }
 });
 
@@ -942,10 +1051,9 @@ app.post("/api/order/:order_ref_number/update-status", async (req, res) => {
     res.json({ message: `Status updated to ${newStatus}` });
   } catch (err) {
     console.error(
-      `❌ Error updating status for order ${order_ref_number}:`,
-      err.message
+      `❌ Error updating status for order ${order_ref_number}: ${err.message}`
     );
-    res.status(500).json({ error: "Database error: " + err.message });
+    res.status(500).json({ error: `Database error: ${err.message}` });
   }
 });
 
@@ -1010,10 +1118,9 @@ app.post("/api/order/:order_ref_number/update-delivery", async (req, res) => {
     res.json({ message: `Delivery time updated to ${newDeliveryTime}` });
   } catch (err) {
     console.error(
-      `❌ Error updating delivery time for order ${order_ref_number}:`,
-      err.message
+      `❌ Error updating delivery time for order ${order_ref_number}: ${err.message}`
     );
-    res.status(500).json({ error: "Database error: " + err.message });
+    res.status(500).json({ error: `Database error: ${err.message}` });
   }
 });
 
@@ -1037,7 +1144,7 @@ app.get("/confirm/:orderRef", async (req, res) => {
     await updateOrderStatusInDB(orderRef, "yes");
     console.log(`✅ Order ${orderRef} status set to 'yes' locally`);
   } catch (e) {
-    console.error("❌ Error in confirm link flow:", e.message);
+    console.error(`❌ Error in confirm link flow: ${e.message}`);
   }
   return res.sendFile(path.join(__dirname, "confirm.html"));
 });
@@ -1048,7 +1155,7 @@ app.get("/reject/:orderRef", async (req, res) => {
   try {
     await updateOrderStatusViaAPI(orderRef, "no");
   } catch (e) {
-    console.error("❌ Error updating via API:", e.message);
+    console.error(`❌ Error updating via API: ${e.message}`);
   }
   return res.sendFile(path.join(__dirname, "reject.html"));
 });
@@ -1085,8 +1192,8 @@ app.get("/api/sendMessage/:phone", async (req, res) => {
       res.status(500).json({ error: "Failed to send confirmation message." });
     }
   } catch (error) {
-    console.error("❌ Error in manual send endpoint:", error.message);
-    res.status(500).json({ error: "Internal server error: " + error.message });
+    console.error(`❌ Error in manual send endpoint: ${error.message}`);
+    res.status(500).json({ error: `Internal server error: ${error.message}` });
   } finally {
     if (connection) connection.release();
   }
@@ -1094,12 +1201,12 @@ app.get("/api/sendMessage/:phone", async (req, res) => {
 
 // Log uncaught exceptions
 process.on("uncaughtException", (err) => {
-  console.error("❌ Uncaught Exception:", err.message, err.stack);
+  console.error(`❌ Uncaught Exception: ${err.message}`, err.stack);
 });
 
 // Log unhandled promise rejections
 process.on("unhandledRejection", (reason, promise) => {
-  console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
+  console.error(`❌ Unhandled Rejection at: ${promise} reason: ${reason}`);
 });
 
 // Log Socket.IO connection events
@@ -1135,7 +1242,7 @@ initializeWhatsAppClient()
     setInterval(() => decrementDeliveryTimes(pool, io), 30 * 1000);
   })
   .catch((err) => {
-    console.error("❌ Fatal: could not initialize WhatsApp client", err);
+    console.error(`❌ Fatal: could not initialize WhatsApp client: ${err.message}`);
     process.exit(1);
   });
 
@@ -1143,7 +1250,11 @@ initializeWhatsAppClient()
 process.on("SIGINT", async () => {
   console.log("🔄 Gracefully shutting down...");
   if (waClient) {
-    await waClient.destroy();
+    try {
+      await waClient.destroy();
+    } catch (err) {
+      console.error(`❌ Error destroying client: ${err.message}`);
+    }
   }
   process.exit(0);
 });
