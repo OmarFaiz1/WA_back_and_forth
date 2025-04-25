@@ -123,16 +123,16 @@ let isClientReady = false;
 let authFailureCount = 0;
 const MAX_AUTH_ATTEMPTS = 3;
 
-async function initializeWhatsAppClient(useRemoteAuth = true) {
+async function initializeWhatsAppClient(useRemoteAuth = true, attempt = 1) {
   if (waClient && isClientReady) {
     console.log("ℹ️ WhatsApp client already initialized and ready");
     return;
   }
-  return new Promise((resolve, reject) => {
-    console.log(
-      `🔄 Initializing WhatsApp client (RemoteAuth: ${useRemoteAuth})...`
-    );
 
+  console.log(`🔄 Initializing WhatsApp client (Attempt ${attempt}, RemoteAuth: ${useRemoteAuth})...`);
+
+  return new Promise((resolve, reject) => {
+    // Choose authentication strategy
     const authStrategy = useRemoteAuth
       ? new RemoteAuth({
           store,
@@ -161,44 +161,49 @@ async function initializeWhatsAppClient(useRemoteAuth = true) {
     });
 
     waClient.on("qr", (qr) => {
-      console.log(
-        "🔑 QR code generated for authentication. Scan the QR code below:"
-      );
+      console.log("🔑 QR code generated for authentication. Scan the QR code below:");
       qrcode.generate(qr, { small: false, margin: 2 }, (code) => {
         console.log(code);
       });
     });
 
     waClient.on("authenticated", () => {
-      console.log("✅ WhatsApp authenticated successfully.");
+      console.log(`✅ WhatsApp authenticated successfully (Attempt ${attempt})`);
       authFailureCount = 0;
     });
 
     waClient.on("auth_failure", async (msg) => {
-      console.error("❌ WhatsApp authentication failed:", msg);
-      isClientReady = false;
+      console.error(`❌ WhatsApp authentication failed (Attempt ${attempt}):`, msg);
       authFailureCount++;
-      console.log(`🔄 Authentication failure count: ${authFailureCount}`);
+      isClientReady = false;
 
-      if (authFailureCount >= MAX_AUTH_ATTEMPTS && useRemoteAuth) {
-        console.log(
-          "⚠️ Max authentication attempts reached. Falling back to QR code authentication..."
-        );
+      if (authFailureCount < MAX_AUTH_ATTEMPTS && useRemoteAuth) {
+        console.log(`🔄 Retrying RemoteAuth (Attempt ${attempt + 1})...`);
+        try {
+          await waClient.destroy();
+          await initializeWhatsAppClient(true, attempt + 1);
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
+      } else {
+        console.log("⚠️ Max authentication attempts reached or using LocalAuth. Falling back to QR code...");
         try {
           await pool.query("DELETE FROM wsp_sessions WHERE session_name = ?", [
             "order-confirmation-sender",
           ]);
           console.log("✅ Cleared session data from database.");
+          await waClient.destroy();
+          await initializeWhatsAppClient(false, 1); // Switch to LocalAuth
+          resolve();
         } catch (err) {
-          console.error("❌ Error clearing session data:", err.message);
+          reject(err);
         }
-        await initializeWhatsAppClient(false);
       }
-      reject(new Error("WhatsApp auth failure"));
     });
 
     waClient.on("ready", () => {
-      console.log("🚀 WhatsApp client is ready.");
+      console.log(`🚀 WhatsApp client is ready (Attempt ${attempt})`);
       isClientReady = true;
       resolve();
     });
@@ -206,19 +211,66 @@ async function initializeWhatsAppClient(useRemoteAuth = true) {
     waClient.on("disconnected", (reason) => {
       console.log(`❌ WhatsApp client disconnected: ${reason}`);
       isClientReady = false;
-      setTimeout(() => initializeWhatsAppClient(useRemoteAuth), 5000);
+      setTimeout(() => initializeWhatsAppClient(useRemoteAuth, attempt), 5000);
     });
 
     waClient.initialize().catch((err) => {
-      console.error("❌ Failed to initialize WhatsApp client:", err.message);
+      console.error(`❌ Failed to initialize WhatsApp client (Attempt ${attempt}):`, err.message);
       isClientReady = false;
-      reject(err);
+
+      if (attempt < MAX_AUTH_ATTEMPTS && useRemoteAuth) {
+        console.log(`🔄 Retrying RemoteAuth (Attempt ${attempt + 1})...`);
+        setTimeout(() => initializeWhatsAppClient(true, attempt + 1), 2000).then(resolve).catch(reject);
+      } else if (useRemoteAuth) {
+        console.log("⚠️ Max RemoteAuth attempts reached. Falling back to QR code...");
+        pool.query("DELETE FROM wsp_sessions WHERE session_name = ?", [
+          "order-confirmation-sender",
+        ])
+          .then(() => {
+            console.log("✅ Cleared session data from database.");
+            return initializeWhatsAppClient(false, 1); // Switch to LocalAuth
+          })
+          .then(resolve)
+          .catch(reject);
+      } else {
+        reject(err);
+      }
     });
+
+    // Check readiness after authentication
+    setTimeout(async () => {
+      if (!isClientReady) {
+        console.warn(`⚠️ WhatsApp client not ready after 60s (Attempt ${attempt})`);
+        if (attempt < MAX_AUTH_ATTEMPTS && useRemoteAuth) {
+          console.log(`🔄 Retrying RemoteAuth (Attempt ${attempt + 1})...`);
+          try {
+            await waClient.destroy();
+            await initializeWhatsAppClient(true, attempt + 1);
+            resolve();
+          } catch (err) {
+            reject(err);
+          }
+        } else if (useRemoteAuth) {
+          console.log("⚠️ Max RemoteAuth attempts reached. Falling back to QR code...");
+          try {
+            await pool.query("DELETE FROM wsp_sessions WHERE session_name = ?", [
+              "order-confirmation-sender",
+            ]);
+            console.log("✅ Cleared session data from database.");
+            await waClient.destroy();
+            await initializeWhatsAppClient(false, 1);
+            resolve();
+          } catch (err) {
+            reject(err);
+          }
+        }
+      }
+    }, 60000);
   });
 }
 
 // Utility: Wait for client readiness with timeout
-async function waitForClientReady(timeoutMs = 30000) {
+async function waitForClientReady(timeoutMs = 60000) {
   console.log("⏳ Waiting for WhatsApp client to be ready...");
   const startTime = Date.now();
   while (!isClientReady && Date.now() - startTime < timeoutMs) {
@@ -248,20 +300,14 @@ async function sendOrderConfirmationMessage(order, retries = 3) {
   let attempt = 1;
   while (attempt <= retries) {
     try {
-      console.log(
-        `🔍 Checking WhatsApp client for order ${order.order_ref_number} confirmation`
-      );
+      console.log(`🔍 Checking WhatsApp client for order ${order.order_ref_number} confirmation`);
       await waitForClientReady();
       let phone = order.phone.trim();
-      console.log(
-        `📱 Processing phone number for order ${order.order_ref_number}: ${phone}`
-      );
+      console.log(`📱 Processing phone number for order ${order.order_ref_number}: ${phone}`);
       phone = convertPhone(phone);
       const waId = `${phone}@c.us`;
       if (!phone.match(/^\d{10,12}$/)) {
-        console.warn(
-          `⚠️ Invalid phone number for order ${order.order_ref_number}: ${phone}`
-        );
+        console.warn(`⚠️ Invalid phone number for order ${order.order_ref_number}: ${phone}`);
         return false;
       }
       const contact = {
@@ -272,21 +318,14 @@ async function sendOrderConfirmationMessage(order, retries = 3) {
       console.log(
         `📤 Sending confirmation message to ${contact.id.user} for order ${order.order_ref_number} (Attempt ${attempt})`
       );
-      const sentMessage = await waClient.sendMessage(
-        contact.id._serialized,
-        messageText
-      );
+      const sentMessage = await waClient.sendMessage(contact.id._serialized, messageText);
       if (sentMessage) {
-        console.log(
-          `✅ Confirmation message sent to ${contact.id.user} for order ${order.order_ref_number}`
-        );
+        console.log(`✅ Confirmation message sent to ${contact.id.user} for order ${order.order_ref_number}`);
         await updateOrderMessageSent(order.order_ref_number);
         listenForOrderReply(contact, order);
         return true;
       }
-      console.log(
-        `❌ Confirmation message failed for ${contact.id.user} (no sentMessage)`
-      );
+      console.log(`❌ Confirmation message failed for ${contact.id.user} (no sentMessage)`);
       return false;
     } catch (error) {
       console.error(
@@ -294,16 +333,16 @@ async function sendOrderConfirmationMessage(order, retries = 3) {
         error.message
       );
       if (attempt === retries) {
-        console.error(
-          `❌ Max retries reached for order ${order.order_ref_number}`
-        );
-        return false;
+        console.error(`❌ Max retries reached for order ${order.order_ref_number}`);
+        if (error.message.includes("WhatsApp client not ready")) {
+          console.log("🔄 Forcing reinitialization with QR code due to persistent readiness failure...");
+          isClientReady = false;
+          await initializeWhatsAppClient(false, 1);
+          return false;
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
-      if (
-        error.message.includes("WidFactory") ||
-        error.message.includes("disconnected")
-      ) {
+      if (error.message.includes("WidFactory") || error.message.includes("disconnected")) {
         console.log("🔄 Reinitializing WhatsApp client due to error...");
         isClientReady = false;
         await initializeWhatsAppClient();
@@ -315,52 +354,31 @@ async function sendOrderConfirmationMessage(order, retries = 3) {
 }
 
 // Send delivery update message with enhanced logging
-async function sendDeliveryUpdateMessage(
-  order,
-  newDeliveryTime,
-  reason,
-  retries = 3
-) {
-  console.log(
-    `🚚 Preparing to send delivery update for order ${order.order_ref_number}`
-  );
+async function sendDeliveryUpdateMessage(order, newDeliveryTime, reason, retries = 3) {
+  console.log(`🚚 Preparing to send delivery update for order ${order.order_ref_number}`);
   let attempt = 1;
   while (attempt <= retries) {
     try {
-      console.log(
-        `🔍 Checking WhatsApp client readiness for order ${order.order_ref_number} (Attempt ${attempt})`
-      );
+      console.log(`🔍 Checking WhatsApp client readiness for order ${order.order_ref_number} (Attempt ${attempt})`);
       await waitForClientReady();
       let phone = order.phone.trim();
-      console.log(
-        `📱 Validating phone number for order ${order.order_ref_number}: ${phone}`
-      );
+      console.log(`📱 Validating phone number for order ${order.order_ref_number}: ${phone}`);
       phone = convertPhone(phone);
       const waId = `${phone}@c.us`;
       if (!phone.match(/^\d{10,12}$/)) {
-        console.warn(
-          `⚠️ Invalid phone number for order ${order.order_ref_number}: ${phone}`
-        );
+        console.warn(`⚠️ Invalid phone number for order ${order.order_ref_number}: ${phone}`);
         return false;
       }
-      const messageText = DELIVERY_UPDATE_MESSAGE(
-        order,
-        newDeliveryTime,
-        reason
-      );
+      const messageText = DELIVERY_UPDATE_MESSAGE(order, newDeliveryTime, reason);
       console.log(
         `📤 Sending delivery update message to ${phone} for order ${order.order_ref_number} (Attempt ${attempt})`
       );
       const sentMessage = await waClient.sendMessage(waId, messageText);
       if (sentMessage) {
-        console.log(
-          `✅ Delivery update message sent to ${phone} for order ${order.order_ref_number}`
-        );
+        console.log(`✅ Delivery update message sent to ${phone} for order ${order.order_ref_number}`);
         return true;
       }
-      console.log(
-        `❌ Delivery update message failed for ${phone} (no sentMessage)`
-      );
+      console.log(`❌ Delivery update message failed for ${phone} (no sentMessage)`);
       return false;
     } catch (error) {
       console.error(
@@ -368,16 +386,16 @@ async function sendDeliveryUpdateMessage(
         error.message
       );
       if (attempt === retries) {
-        console.error(
-          `❌ Max retries reached for order ${order.order_ref_number}`
-        );
-        return false;
+        console.error(`❌ Max retries reached for order ${order.order_ref_number}`);
+        if (error.message.includes("WhatsApp client not ready")) {
+          console.log("🔄 Forcing reinitialization with QR code due to persistent readiness failure...");
+          isClientReady = false;
+          await initializeWhatsAppClient(false, 1);
+          return false;
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
-      if (
-        error.message.includes("WidFactory") ||
-        error.message.includes("disconnected")
-      ) {
+      if (error.message.includes("WidFactory") || error.message.includes("disconnected")) {
         console.log("🔄 Reinitializing WhatsApp client due to error...");
         isClientReady = false;
         await initializeWhatsAppClient();
@@ -385,31 +403,24 @@ async function sendDeliveryUpdateMessage(
     }
     attempt++;
   }
-  console.log(
-    `❌ Failed to send delivery update for order ${order.order_ref_number} after ${retries} attempts`
-  );
+  console.log(`❌ Failed to send delivery update for order ${order.order_ref_number} after ${retries} attempts`);
   return false;
 }
 
 // Send cancellation message
 async function sendCancellationMessage(order, reason, retries = 3) {
+  console.log(`🚨 Preparing to send cancellation message for order ${order.order_ref_number}`);
   let attempt = 1;
   while (attempt <= retries) {
     try {
-      console.log(
-        `🔍 Checking WhatsApp client for cancellation of order ${order.order_ref_number}`
-      );
+      console.log(`🔍 Checking WhatsApp client readiness for cancellation of order ${order.order_ref_number} (Attempt ${attempt})`);
       await waitForClientReady();
       let phone = order.phone.trim();
-      console.log(
-        `📱 Processing phone number for cancellation of order ${order.order_ref_number}: ${phone}`
-      );
+      console.log(`📱 Processing phone number for cancellation of order ${order.order_ref_number}: ${phone}`);
       phone = convertPhone(phone);
       const waId = `${phone}@c.us`;
       if (!phone.match(/^\d{10,12}$/)) {
-        console.warn(
-          `⚠️ Invalid phone number for order ${order.order_ref_number}: ${phone}`
-        );
+        console.warn(`⚠️ Invalid phone number for order ${order.order_ref_number}: ${phone}`);
         return false;
       }
       const messageText = CANCELLATION_MESSAGE(order, reason);
@@ -418,14 +429,10 @@ async function sendCancellationMessage(order, reason, retries = 3) {
       );
       const sentMessage = await waClient.sendMessage(waId, messageText);
       if (sentMessage) {
-        console.log(
-          `✅ Cancellation message sent to ${phone} for order ${order.order_ref_number}`
-        );
+        console.log(`✅ Cancellation message sent to ${phone} for order ${order.order_ref_number}`);
         return true;
       }
-      console.log(
-        `❌ Cancellation message failed for ${phone} (no sentMessage)`
-      );
+      console.log(`❌ Cancellation message failed for ${phone} (no sentMessage)`);
       return false;
     } catch (error) {
       console.error(
@@ -433,16 +440,16 @@ async function sendCancellationMessage(order, reason, retries = 3) {
         error.message
       );
       if (attempt === retries) {
-        console.error(
-          `❌ Max retries reached for order ${order.order_ref_number}`
-        );
-        return false;
+        console.error(`❌ Max retries reached for order ${order.order_ref_number}`);
+        if (error.message.includes("WhatsApp client not ready")) {
+          console.log("🔄 Forcing reinitialization with QR code due to persistent readiness failure...");
+          isClientReady = false;
+          await initializeWhatsAppClient(false, 1);
+          return false;
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
-      if (
-        error.message.includes("WidFactory") ||
-        error.message.includes("disconnected")
-      ) {
+      if (error.message.includes("WidFactory") || error.message.includes("disconnected")) {
         console.log("🔄 Reinitializing WhatsApp client due to error...");
         isClientReady = false;
         await initializeWhatsAppClient();
@@ -902,10 +909,7 @@ app.post("/api/order/:order_ref_number/update-status", async (req, res) => {
   const order_ref_number = req.params.order_ref_number;
   const newStatus = req.body.status;
   const cancellationReason = req.body.cancellationReason;
-  console.log(
-    `📋 Status update request for order ${order_ref_number}:`,
-    req.body
-  );
+  console.log(`📋 Status update request for order ${order_ref_number}:`, req.body);
   if (!newStatus || !["yes", "no"].includes(newStatus)) {
     console.log(
       `❌ Invalid status for order ${order_ref_number}: ${newStatus}`
@@ -928,14 +932,10 @@ app.post("/api/order/:order_ref_number/update-status", async (req, res) => {
         [order_ref_number]
       );
       if (orderResults.length > 0) {
-        console.log(
-          `🚨 Sending cancellation message for order ${order_ref_number}`
-        );
+        console.log(`🚨 Sending cancellation message for order ${order_ref_number}`);
         await sendCancellationMessage(orderResults[0], cancellationReason);
       } else {
-        console.warn(
-          `⚠️ Order ${order_ref_number} not found for cancellation message`
-        );
+        console.warn(`⚠️ Order ${order_ref_number} not found for cancellation message`);
       }
     }
     await emitOrdersUpdate(io, pool);
@@ -952,11 +952,8 @@ app.post("/api/order/:order_ref_number/update-status", async (req, res) => {
 app.post("/api/order/:order_ref_number/update-delivery", async (req, res) => {
   const order_ref_number = req.params.order_ref_number;
   const newDeliveryTime = parseInt(req.body.delivery_time);
-  const delayReason = req.body.delayReason || "Delivery time updated"; // Default reason
-  console.log(
-    `📋 Delivery update request for order ${order_ref_number}:`,
-    req.body
-  );
+  const delayReason = req.body.delayReason || "Delivery time updated";
+  console.log(`📋 Delivery update request for order ${order_ref_number}:`, req.body);
   if (isNaN(newDeliveryTime) || newDeliveryTime < 0) {
     console.log(
       `❌ Invalid delivery time for order ${order_ref_number}: ${newDeliveryTime}`
@@ -973,9 +970,7 @@ app.post("/api/order/:order_ref_number/update-delivery", async (req, res) => {
     console.log(
       `✅ Updated delivery time for order ${order_ref_number} to ${newDeliveryTime}`
     );
-    console.log(
-      `🔍 Fetching order ${order_ref_number} for delivery update message`
-    );
+    console.log(`🔍 Fetching order ${order_ref_number} for delivery update message`);
     const [orderResults] = await pool.query(
       "SELECT * FROM testingTrialAcc WHERE order_ref_number = ?",
       [order_ref_number]
@@ -987,11 +982,7 @@ app.post("/api/order/:order_ref_number/update-delivery", async (req, res) => {
         phone: order.phone,
         amount: order.amount,
       });
-      if (
-        order.phone &&
-        order.phone !== "0000000000" &&
-        order.phone.match(/^\d{10,12}$/)
-      ) {
+      if (order.phone && order.phone !== "0000000000" && order.phone.match(/^\d{10,12}$/)) {
         console.log(
           `🚚 Sending delivery update message for order ${order_ref_number} with reason: ${delayReason}`
         );
