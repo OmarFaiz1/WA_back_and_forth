@@ -7,8 +7,7 @@ const path = require("path");
 const express = require("express");
 const mysql = require("mysql2/promise");
 const axios = require("axios");
-const { Client, RemoteAuth, LocalAuth } = require("whatsapp-web.js");
-const { MysqlStore } = require("wwebjs-mysql");
+const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -108,43 +107,33 @@ Best regards,
 // Initialize MySQL connection pool
 const pool = mysql.createPool(DB_CONFIG);
 
-// Configure MysqlStore for RemoteAuth
-const tableInfo = {
-  table: "wsp_sessions",
-  session_column: "session_name",
-  data_column: "data",
-  updated_at_column: "updated_at",
-};
-const store = new MysqlStore({ pool, tableInfo });
-
 // WhatsApp client initialization
 let waClient = null;
 let isClientReady = false;
-let authFailureCount = 0;
-const MAX_AUTH_ATTEMPTS = 3;
 
-async function initializeWhatsAppClient(useRemoteAuth = true, attempt = 1) {
+async function initializeWhatsAppClient() {
   if (waClient && isClientReady) {
     console.log("ℹ️ WhatsApp client already initialized and ready");
     return;
   }
 
-  console.log(`🔄 Initializing WhatsApp client (Attempt ${attempt}, RemoteAuth: ${useRemoteAuth})...`);
+  console.log("🔄 Initializing WhatsApp client with LocalAuth...");
 
-  return new Promise((resolve, reject) => {
-    // Choose authentication strategy
-    const authStrategy = useRemoteAuth
-      ? new RemoteAuth({
-          store,
-          clientId: "order-confirmation-sender",
-          backupSyncIntervalMs: 300000,
-        })
-      : new LocalAuth({ clientId: "order-confirmation-sender" });
+  try {
+    // Destroy any existing client
+    if (waClient) {
+      try {
+        await waClient.destroy();
+        console.log("✅ Previous WhatsApp client destroyed");
+      } catch (err) {
+        console.error(`❌ Error destroying previous client: ${err.message}`);
+      }
+    }
 
     waClient = new Client({
-      authStrategy,
+      authStrategy: new LocalAuth({ clientId: "order-confirmation-sender" }),
       puppeteer: {
-        headless: process.env.HEADLESS_MODE !== "false",
+        headless: true,
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
@@ -152,7 +141,6 @@ async function initializeWhatsAppClient(useRemoteAuth = true, attempt = 1) {
           "--disable-accelerated-2d-canvas",
           "--no-first-run",
           "--disable-gpu",
-          "--disable-extensions",
           "--no-zygote",
           "--single-process",
         ],
@@ -168,163 +156,34 @@ async function initializeWhatsAppClient(useRemoteAuth = true, attempt = 1) {
     });
 
     waClient.on("authenticated", () => {
-      console.log(`✅ WhatsApp authenticated successfully (Attempt ${attempt})`);
-      authFailureCount = 0;
-    });
-
-    waClient.on("auth_failure", async (msg) => {
-      console.error(`❌ WhatsApp authentication failed (Attempt ${attempt}): ${msg}`);
-      isClientReady = false;
-      authFailureCount++;
-
-      if (authFailureCount < MAX_AUTH_ATTEMPTS && useRemoteAuth) {
-        console.log(`🔄 Retrying RemoteAuth (Attempt ${attempt + 1})...`);
-        if (waClient) {
-          try {
-            await waClient.destroy();
-          } catch (err) {
-            console.error(`❌ Error destroying client: ${err.message}`);
-          }
-        }
-        waClient = null;
-        setTimeout(async () => {
-          try {
-            await initializeWhatsAppClient(true, attempt + 1);
-            resolve();
-          } catch (err) {
-            reject(err);
-          }
-        }, 2000);
-      } else {
-        console.log("⚠️ Max authentication attempts reached or using LocalAuth. Falling back to QR code...");
-        if (waClient) {
-          try {
-            await waClient.destroy();
-          } catch (err) {
-            console.error(`❌ Error destroying client: ${err.message}`);
-          }
-        }
-        waClient = null;
-        try {
-          await pool.query("DELETE FROM wsp_sessions WHERE session_name = ?", [
-            "order-confirmation-sender",
-          ]);
-          console.log("✅ Cleared session data from database.");
-          await initializeWhatsAppClient(false, 1);
-          resolve();
-        } catch (err) {
-          reject(err);
-        }
-      }
+      console.log("✅ WhatsApp authenticated successfully");
     });
 
     waClient.on("ready", () => {
-      console.log(`🚀 WhatsApp client is ready (Attempt ${attempt})`);
+      console.log("🚀 WhatsApp client is ready");
       isClientReady = true;
-      resolve();
     });
 
     waClient.on("disconnected", (reason) => {
       console.log(`❌ WhatsApp client disconnected: ${reason}`);
       isClientReady = false;
-      setTimeout(() => initializeWhatsAppClient(useRemoteAuth, attempt), 5000);
+      setTimeout(initializeWhatsAppClient, 5000);
     });
 
-    waClient
-      .initialize()
-      .catch(async (err) => {
-        console.error(`❌ Failed to initialize WhatsApp client (Attempt ${attempt}): ${err.message}`);
-        isClientReady = false;
+    await waClient.initialize();
+    console.log("✅ WhatsApp client initialization attempted");
 
-        if (attempt < MAX_AUTH_ATTEMPTS && useRemoteAuth) {
-          console.log(`🔄 Retrying RemoteAuth (Attempt ${attempt + 1})...`);
-          if (waClient) {
-            try {
-              await waClient.destroy();
-            } catch (err) {
-              console.error(`❌ Error destroying client: ${err.message}`);
-            }
-          }
-          waClient = null;
-          setTimeout(async () => {
-            try {
-              await initializeWhatsAppClient(true, attempt + 1);
-              resolve();
-            } catch (err) {
-              reject(err);
-            }
-          }, 2000);
-        } else if (useRemoteAuth) {
-          console.log("⚠️ Max RemoteAuth attempts reached. Falling back to QR code...");
-          if (waClient) {
-            try {
-              await waClient.destroy();
-            } catch (err) {
-              console.error(`❌ Error destroying client: ${err.message}`);
-            }
-          }
-          waClient = null;
-          try {
-            await pool.query("DELETE FROM wsp_sessions WHERE session_name = ?", [
-              "order-confirmation-sender",
-            ]);
-            console.log("✅ Cleared session data from database.");
-            await initializeWhatsAppClient(false, 1);
-            resolve();
-          } catch (err) {
-            reject(err);
-          }
-        } else {
-          reject(err);
-        }
-      });
-
-    // Check readiness after authentication
-    setTimeout(async () => {
+    // Monitor readiness
+    setTimeout(() => {
       if (!isClientReady) {
-        console.warn(`⚠️ WhatsApp client not ready after 60s (Attempt ${attempt})`);
-        if (attempt < MAX_AUTH_ATTEMPTS && useRemoteAuth) {
-          console.log(`🔄 Retrying RemoteAuth (Attempt ${attempt + 1})...`);
-          if (waClient) {
-            try {
-              await waClient.destroy();
-            } catch (err) {
-              console.error(`❌ Error destroying client: ${err.message}`);
-            }
-          }
-          waClient = null;
-          setTimeout(async () => {
-            try {
-              await initializeWhatsAppClient(true, attempt + 1);
-              resolve();
-            } catch (err) {
-              reject(err);
-            }
-          }, 2000);
-        } else if (useRemoteAuth) {
-          console.log("⚠️ Max RemoteAuth attempts reached. Falling back to QR code...");
-          if (waClient) {
-            try {
-              await waClient.destroy();
-            } catch (err) {
-              console.error(`❌ Error destroying client: ${err.message}`);
-            }
-          }
-          waClient = null;
-          try {
-            await pool.query("DELETE FROM wsp_sessions WHERE session_name = ?", [
-              "order-confirmation-sender",
-            ]);
-            console.log("✅ Cleared session data from database.");
-            await initializeWhatsAppClient(false, 1);
-            resolve();
-          } catch (err) {
-            reject(err);
-          }
-        }
+        console.warn("⚠️ WhatsApp client not ready after 60s. Retrying...");
+        initializeWhatsAppClient();
       }
     }, 60000);
-  });
+  } catch (err) {
+    console.error(`❌ Failed to initialize WhatsApp client: ${err.message}`);
+    setTimeout(initializeWhatsAppClient, 5000);
+  }
 }
 
 // Utility: Wait for client readiness with timeout
@@ -393,41 +252,20 @@ async function sendOrderConfirmationMessage(order, retries = 3) {
       if (attempt === retries) {
         console.error(`❌ Max retries reached for order ${order.order_ref_number}`);
         if (error.message.includes("WhatsApp client not ready") || error.message.includes("Target closed")) {
-          console.log("🔄 Forcing reinitialization with QR code due to persistent readiness failure...");
+          console.log("🔄 Reinitializing WhatsApp client due to persistent failure...");
           isClientReady = false;
-          if (waClient) {
-            try {
-              await waClient.destroy();
-            } catch (err) {
-              console.error(`❌ Error destroying client: ${err.message}`);
-            }
-          }
-          waClient = null;
-          await initializeWhatsAppClient(false, 1);
+          await initializeWhatsAppClient();
           return false;
         }
       }
       await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
-      if (error.message.includes("WidFactory") || error.message.includes("disconnected") || error.message.includes("Target closed")) {
-        console.log("🔄 Reinitializing WhatsApp client due to error...");
-        isClientReady = false;
-        if (waClient) {
-          try {
-            await waClient.destroy();
-          } catch (err) {
-            console.error(`❌ Error destroying client: ${err.message}`);
-          }
-        }
-        waClient = null;
-        await initializeWhatsAppClient();
-      }
     }
     attempt++;
   }
   return false;
 }
 
-// Send delivery update message with enhanced logging
+// Send delivery update message
 async function sendDeliveryUpdateMessage(order, newDeliveryTime, reason, retries = 3) {
   console.log(`🚚 Preparing to send delivery update for order ${order.order_ref_number}`);
   let attempt = 1;
@@ -461,34 +299,13 @@ async function sendDeliveryUpdateMessage(order, newDeliveryTime, reason, retries
       if (attempt === retries) {
         console.error(`❌ Max retries reached for order ${order.order_ref_number}`);
         if (error.message.includes("WhatsApp client not ready") || error.message.includes("Target closed")) {
-          console.log("🔄 Forcing reinitialization with QR code due to persistent readiness failure...");
+          console.log("🔄 Reinitializing WhatsApp client due to persistent failure...");
           isClientReady = false;
-          if (waClient) {
-            try {
-              await waClient.destroy();
-            } catch (err) {
-              console.error(`❌ Error destroying client: ${err.message}`);
-            }
-          }
-          waClient = null;
-          await initializeWhatsAppClient(false, 1);
+          await initializeWhatsAppClient();
           return false;
         }
       }
       await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
-      if (error.message.includes("WidFactory") || error.message.includes("disconnected") || error.message.includes("Target closed")) {
-        console.log("🔄 Reinitializing WhatsApp client due to error...");
-        isClientReady = false;
-        if (waClient) {
-          try {
-            await waClient.destroy();
-          } catch (err) {
-            console.error(`❌ Error destroying client: ${err.message}`);
-          }
-        }
-        waClient = null;
-        await initializeWhatsAppClient();
-      }
     }
     attempt++;
   }
@@ -530,34 +347,13 @@ async function sendCancellationMessage(order, reason, retries = 3) {
       if (attempt === retries) {
         console.error(`❌ Max retries reached for order ${order.order_ref_number}`);
         if (error.message.includes("WhatsApp client not ready") || error.message.includes("Target closed")) {
-          console.log("🔄 Forcing reinitialization with QR code due to persistent readiness failure...");
+          console.log("🔄 Reinitializing WhatsApp client due to persistent failure...");
           isClientReady = false;
-          if (waClient) {
-            try {
-              await waClient.destroy();
-            } catch (err) {
-              console.error(`❌ Error destroying client: ${err.message}`);
-            }
-          }
-          waClient = null;
-          await initializeWhatsAppClient(false, 1);
+          await initializeWhatsAppClient();
           return false;
         }
       }
       await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
-      if (error.message.includes("WidFactory") || error.message.includes("disconnected") || error.message.includes("Target closed")) {
-        console.log("🔄 Reinitializing WhatsApp client due to error...");
-        isClientReady = false;
-        if (waClient) {
-          try {
-            await waClient.destroy();
-          } catch (err) {
-            console.error(`❌ Error destroying client: ${err.message}`);
-          }
-        }
-        waClient = null;
-        await initializeWhatsAppClient();
-      }
     }
     attempt++;
   }
