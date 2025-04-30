@@ -649,6 +649,17 @@ async function processNewShopifyOrders() {
         [orderRefNumber]
       );
       if (rows.length === 0) {
+        // Clean the phone number by removing non-digits
+        let phone = order.shipping_address && order.shipping_address.phone
+          ? order.shipping_address.phone.replace(/\D/g, '') // Remove all non-digits (e.g., "+", spaces)
+          : null;
+        // Validate the cleaned phone number
+        if (phone && phone.match(/^\d{10,12}$/)) {
+          console.log(`✅ Valid phone number for order ${orderRefNumber}: ${phone}`);
+        } else {
+          console.warn(`⚠️ Invalid or missing phone number for order ${orderRefNumber}, using default. Raw phone: ${order.shipping_address?.phone}`);
+          phone = '0000000000'; // Default value to satisfy NOT NULL constraint
+        }
         const insertData = {
           order_ref_number: orderRefNumber,
           order_ref: order.id,
@@ -658,10 +669,7 @@ async function processNewShopifyOrders() {
           city: order.shipping_address
             ? order.shipping_address.city
             : "Unknown",
-          phone:
-            order.shipping_address && order.shipping_address.phone && order.shipping_address.phone.match(/^\d{10,12}$/)
-              ? order.shipping_address.phone
-              : null,
+          phone: phone,
           amount: order.total_price,
           status: "no",
           delivery_time: 4,
@@ -670,7 +678,7 @@ async function processNewShopifyOrders() {
         };
         await connection.query(
           `INSERT INTO testingTrialAcc 
-            (order_ref_number, order_ref, customer_name, city, phone, amount, status, delivery_time, messageSent, lastMessageSent) 
+           (order_ref_number, order_ref, customer_name, city, phone, amount, status, delivery_time, messageSent, lastMessageSent) 
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             insertData.order_ref_number,
@@ -686,7 +694,7 @@ async function processNewShopifyOrders() {
           ]
         );
         console.log(`✅ Inserted new order ${orderRefNumber} into DB`);
-        if (insertData.phone) {
+        if (insertData.phone && insertData.phone !== '0000000000') {
           sendOrderConfirmationMessage(insertData);
         } else {
           console.warn(`⚠️ Skipping confirmation message for order ${orderRefNumber}: Invalid phone number`);
@@ -757,8 +765,18 @@ async function syncShopifyOrders(pool) {
       if (order.shipping_address && order.shipping_address.city) {
         city = order.shipping_address.city;
       }
-      if (order.shipping_address && order.shipping_address.phone && order.shipping_address.phone.match(/^\d{10,12}$/)) {
-        phone = order.shipping_address.phone;
+      // Clean the phone number by removing non-digits
+      if (order.shipping_address && order.shipping_address.phone) {
+        phone = order.shipping_address.phone.replace(/\D/g, ''); // Remove all non-digits
+        if (!phone.match(/^\d{10,12}$/)) {
+          console.warn(`⚠️ Invalid phone number for order ${order.order_number}, using default. Raw phone: ${order.shipping_address.phone}`);
+          phone = '0000000000'; // Default value to satisfy NOT NULL constraint
+        } else {
+          console.log(`✅ Valid phone number for order ${order.order_number}: ${phone}`);
+        }
+      } else {
+        console.warn(`⚠️ Missing phone number for order ${order.order_number}, using default.`);
+        phone = '0000000000'; // Default value to satisfy NOT NULL constraint
       }
       return {
         order_ref_number: parseInt(order.order_number),
@@ -834,7 +852,7 @@ async function syncShopifyOrders(pool) {
           [order.order_ref_number, order.order_ref, order.customer_name, order.city, order.phone, order.amount]
         );
         console.log(`✅ Inserted new order #${order.order_ref_number}.`);
-        if (order.phone) {
+        if (order.phone && order.phone !== '0000000000') {
           sendOrderConfirmationMessage(order);
         } else {
           console.warn(`⚠️ Skipping confirmation message for order ${order.order_ref_number}: Invalid phone number`);
