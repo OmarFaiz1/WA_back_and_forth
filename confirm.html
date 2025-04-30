@@ -4,25 +4,99 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <script src="https://cdn.tailwindcss.com"></script>
-    <title>Order Confirmed</title>
+    <title>Order Confirmation</title>
   </head>
   <body class="bg-green-50 flex items-center justify-center min-h-screen">
     <div class="bg-white p-8 rounded-2xl shadow-xl max-w-md text-center">
-      <h1 class="text-3xl font-bold text-green-700 mb-4">🎉 Thank you!</h1>
+      <h1 id="pageTitle" class="text-3xl font-bold text-green-700 mb-4">🎉 Thank you!</h1>
       <p class="text-gray-700 mb-6">
         Your order
         <span id="orderRef" class="font-mono text-indigo-600"></span> has been
         <span class="font-semibold text-green-600">confirmed</span>.
       </p>
+      <div id="noteSection" class="mb-6">
+        <h2 id="noteTitle" class="text-xl font-semibold text-gray-800 mb-2">Add/Edit Custom Details</h2>
+        <textarea
+          id="customNote"
+          class="w-full p-2 border rounded resize-none"
+          rows="4"
+          placeholder="Enter any custom details about your order..."
+        ></textarea>
+        <button
+          id="saveNoteBtn"
+          class="mt-2 bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded"
+          onclick="saveNote()"
+        >
+          Save Note
+        </button>
+      </div>
+      <p id="noteStatus" class="text-sm text-gray-500 hidden"></p>
       <p class="text-sm text-gray-500">
         We’re getting started on your delivery—see you soon!
       </p>
     </div>
 
     <script>
-      // extract orderRef from URL
       const orderRef = window.location.pathname.split("/").pop();
       document.getElementById("orderRef").textContent = orderRef;
+
+      async function checkNoteEditPermission() {
+        try {
+          const res = await fetch(`/api/order/${orderRef}/note`);
+          const data = await res.json();
+          if (res.status === 403) {
+            document.getElementById("noteSection").classList.add("hidden");
+            document.getElementById("noteStatus").classList.remove("hidden");
+            document.getElementById("noteStatus").textContent =
+              "The window to add or edit custom notes has expired.";
+            document.getElementById("pageTitle").textContent = "Order Confirmed";
+            document.getElementById("noteTitle").textContent = "Custom Details";
+          } else {
+            document.getElementById("customNote").value = data.note || "";
+            document.getElementById("pageTitle").textContent = "Add/Edit Custom Details";
+            document.getElementById("noteTitle").textContent = "Add/Edit Custom Details";
+          }
+        } catch (error) {
+          console.error("Error checking note permission:", error);
+          document.getElementById("noteStatus").classList.remove("hidden");
+          document.getElementById("noteStatus").textContent =
+            "Error checking note permission.";
+        }
+      }
+
+      async function saveNote() {
+        const note = document.getElementById("customNote").value.trim();
+        try {
+          const res = await fetch(`/api/order/${orderRef}/note`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ note }),
+          });
+          const data = await res.json();
+          if (res.ok) {
+            document.getElementById("noteStatus").classList.remove("hidden");
+            document.getElementById("noteStatus").textContent =
+              "Note saved successfully!";
+            document.getElementById("noteStatus").classList.add("text-green-600");
+            setTimeout(() => {
+              document.getElementById("noteStatus").classList.add("hidden");
+            }, 3000);
+          } else {
+            document.getElementById("noteStatus").classList.remove("hidden");
+            document.getElementById("noteStatus").textContent =
+              data.error || "Failed to save note.";
+            document.getElementById("noteStatus").classList.add("text-red-600");
+          }
+        } catch (error) {
+          console.error("Error saving note:", error);
+          document.getElementById("noteStatus").classList.remove("hidden");
+          document.getElementById("noteStatus").textContent =
+            "Error saving note.";
+          document.getElementById("noteStatus").classList.add("text-red-600");
+        }
+      }
+
+      checkNoteEditPermission();
     </script>
   </body>
 </html>
