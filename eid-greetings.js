@@ -134,7 +134,7 @@ We regret to inform you that your order *${order.order_ref_number}* (PKR *${orde
 
 *Reason for Cancellation*: ${reason}
 
-We apologize for any inconvenience caused. Please contact us if you have any questions or need further assistance.
+We apologize for personally inconvenience caused. Please contact us if you have any questions or need further assistance.
 
 Best regards,
 [Your Company Name]
@@ -457,6 +457,7 @@ async function updateOrderStatusInDB(orderRefNumber, newStatus) {
       [newStatus, orderRefNumber]
     );
     console.log(`✅ Order ${orderRefNumber} status updated in DB to "${newStatus}"`);
+    await emitOrdersUpdate(io, pool); // Notify clients
   } catch (error) {
     console.error(`❌ Error updating order ${orderRefNumber} status in DB: ${error.message}`);
   } finally {
@@ -522,6 +523,7 @@ async function saveCustomNote(orderRefNumber, note) {
     }
   } catch (error) {
     console.error(`❌ Error saving custom note for order ${orderRefNumber}: ${error.message}`);
+    throw error;
   } finally {
     if (connection) connection.release();
   }
@@ -540,7 +542,7 @@ async function getCustomNote(orderRefNumber) {
     return rows.length > 0 ? rows[0].note : null;
   } catch (error) {
     console.error(`❌ Error fetching custom note for order ${orderRefNumber}: ${error.message}`);
-    return null;
+    throw error;
   } finally {
     if (connection) connection.release();
   }
@@ -551,15 +553,27 @@ async function canEditNote(orderRefNumber) {
   let connection;
   try {
     connection = await pool.getConnection();
-    const [rows] = await connection.query(
-      "SELECT created_at FROM testingTrialAcc WHERE order_ref_number = ?",
+    // Check if a note exists in CustomNotes
+    const [noteRows] = await connection.query(
+      "SELECT created_at FROM CustomNotes WHERE order_ref_number = ?",
       [orderRefNumber]
     );
-    if (rows.length === 0) {
-      console.log(`⚠️ Order ${orderRefNumber} not found`);
-      return false;
+    let createdAt;
+    if (noteRows.length > 0) {
+      // Use CustomNotes.created_at for existing notes
+      createdAt = new Date(noteRows[0].created_at);
+    } else {
+      // For new notes, use testingTrialAcc.created_at
+      const [orderRows] = await connection.query(
+        "SELECT created_at FROM testingTrialAcc WHERE order_ref_number = ?",
+        [orderRefNumber]
+      );
+      if (orderRows.length === 0) {
+        console.log(`⚠️ Order ${orderRefNumber} not found`);
+        return false;
+      }
+      createdAt = new Date(orderRows[0].created_at);
     }
-    const createdAt = new Date(rows[0].created_at);
     const now = new Date();
     const hoursDiff = (now - createdAt) / (1000 * 60 * 60);
     const canEdit = hoursDiff <= NOTE_EDIT_WINDOW_HOURS;
@@ -922,13 +936,31 @@ app.post("/api/order/:order_ref_number/update-status", async (req, res) => {
     console.log(`❌ Invalid status for order ${order_ref_number}: ${newStatus}`);
     return res.status(400).json({ error: "Invalid status" });
   }
-  const updateSQL = "UPDATE testingTrialAcc SET status = ? WHERE order_ref_number = ?";
+  let connection;
   try {
+    connection = await pool.getConnection();
+    console.log(`🔍 Checking 12-hour window for order ${order_ref_number}`);
+    const [orderRows] = await connection.query(
+      "SELECT created_at FROM testingTrialAcc WHERE order_ref_number = ?",
+      [order_ref_number]
+    );
+    if (orderRows.length === 0) {
+      console.log(`⚠️ Order ${order_ref_number} not found`);
+      return res.status(404).json({ error: "Order not found" });
+    }
+    const createdAt = new Date(orderRows[0].created_at);
+    const now = new Date();
+    const hoursDiff = (now - createdAt) / (1000 * 60 * 60);
+    if (hoursDiff > NOTE_EDIT_WINDOW_HOURS) {
+      console.log(`⛔ Status update window expired for order ${order_ref_number}`);
+      return res.status(403).json({ error: "Sorry, 12 hours have passed. You can no longer update the order status." });
+    }
+    const updateSQL = "UPDATE testingTrialAcc SET status = ? WHERE order_ref_number = ?";
     console.log(`🔄 Updating status for order ${order_ref_number} to "${newStatus}"`);
-    await pool.query(updateSQL, [newStatus, order_ref_number]);
+    await connection.query(updateSQL, [newStatus, order_ref_number]);
     console.log(`✅ Updated status for order ${order_ref_number} to "${newStatus}"`);
     if (newStatus === "no" && cancellationReason) {
-      const [orderResults] = await pool.query(
+      const [orderResults] = await connection.query(
         "SELECT * FROM testingTrialAcc WHERE order_ref_number = ?",
         [order_ref_number]
       );
@@ -944,6 +976,8 @@ app.post("/api/order/:order_ref_number/update-status", async (req, res) => {
   } catch (err) {
     console.error(`❌ Error updating status for order ${order_ref_number}: ${err.message}`);
     res.status(500).json({ error: `Database error: ${err.message}` });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
@@ -1001,7 +1035,7 @@ app.post("/api/order/:order_ref_number/note", async (req, res) => {
     const canEdit = await canEditNote(order_ref_number);
     if (!canEdit) {
       console.log(`⛔ Note edit window expired for order ${order_ref_number}`);
-      return res.status(403).json({ error: "Note edit window has expired" });
+      return res.status(403).json({ error: "Sorry, 12 hours have passed. You can no longer add or edit the custom note." });
     }
     await saveCustomNote(order_ref_number, note);
     res.json({ message: "Note saved successfully" });
@@ -1027,6 +1061,11 @@ app.post("/api/order/:order_ref_number/agent-feedback", async (req, res) => {
   const agentMessage = req.body.message;
   console.log(`📩 Agent feedback for order ${order_ref_number}: ${agentMessage}`);
   try {
+    const canEdit = await canEditNote(order_ref_number);
+    if (!canEdit) {
+      console.log(`⛔ Note edit window expired for order ${order_ref_number}`);
+      return res.status(403).json({ error: "Sorry, 12 hours have passed. You can no longer add or edit the custom note." });
+    }
     const [orderResults] = await pool.query(
       "SELECT * FROM testingTrialAcc WHERE order_ref_number = ?",
       [order_ref_number]
@@ -1040,6 +1079,7 @@ app.post("/api/order/:order_ref_number/agent-feedback", async (req, res) => {
     const sent = await sendAgentFeedbackMessage(order, customerNote, agentMessage);
     if (sent) {
       console.log(`✅ Agent feedback sent for order ${order_ref_number}`);
+      await saveCustomNote(order_ref_number, `${customerNote}\nAgent: ${agentMessage}`);
       res.json({ message: "Feedback sent successfully" });
     } else {
       console.log(`❌ Failed to send agent feedback for order ${order_ref_number}`);
@@ -1066,12 +1106,25 @@ app.get("/api/status", (req, res) => {
 app.get("/confirm/:orderRef", async (req, res) => {
   const { orderRef } = req.params;
   console.log(`🔗 Order ${orderRef} accessed via confirm link`);
+  let connection;
   try {
+    connection = await pool.getConnection();
     const [orderResults] = await pool.query(
-      "SELECT status FROM testingTrialAcc WHERE order_ref_number = ?",
+      "SELECT status, created_at FROM testingTrialAcc WHERE order_ref_number = ?",
       [orderRef]
     );
-    if (orderResults.length > 0 && orderResults[0].status !== "yes") {
+    if (orderResults.length === 0) {
+      console.log(`⚠️ Order ${orderRef} not found`);
+      return res.status(404).send("Order not found");
+    }
+    const createdAt = new Date(orderResults[0].created_at);
+    const now = new Date();
+    const hoursDiff = (now - createdAt) / (1000 * 60 * 60);
+    if (hoursDiff > NOTE_EDIT_WINDOW_HOURS) {
+      console.log(`⛔ Confirmation window expired for order ${orderRef}`);
+      return res.status(403).send("Sorry, 12 hours have passed. You can no longer confirm this order.");
+    }
+    if (orderResults[0].status !== "yes") {
       await updateOrderStatusViaAPI(orderRef, "yes");
       await updateOrderStatusInDB(orderRef, "yes");
       console.log(`✅ Order ${orderRef} status set to 'yes' locally`);
@@ -1080,18 +1133,44 @@ app.get("/confirm/:orderRef", async (req, res) => {
   } catch (e) {
     console.error(`❌ Error in confirm link flow: ${e.message}`);
     res.status(500).send("Internal Server Error");
+  } finally {
+    if (connection) connection.release();
   }
 });
 
 app.get("/reject/:orderRef", async (req, res) => {
   const { orderRef } = req.params;
   console.log(`🔗 Order ${orderRef} rejected via link`);
+  let connection;
   try {
-    await updateOrderStatusViaAPI(orderRef, "no");
+    connection = await pool.getConnection();
+    const [orderResults] = await pool.query(
+      "SELECT status, created_at FROM testingTrialAcc WHERE order_ref_number = ?",
+      [orderRef]
+    );
+    if (orderResults.length === 0) {
+      console.log(`⚠️ Order ${orderRef} not found`);
+      return res.status(404).send("Order not found");
+    }
+    const createdAt = new Date(orderResults[0].created_at);
+    const now = new Date();
+    const hoursDiff = (now - createdAt) / (1000 * 60 * 60);
+    if (hoursDiff > NOTE_EDIT_WINDOW_HOURS) {
+      console.log(`⛔ Rejection window expired for order ${orderRef}`);
+      return res.status(403).send("Sorry, 12 hours have passed. You can no longer reject this order.");
+    }
+    if (orderResults[0].status !== "no") {
+      await updateOrderStatusViaAPI(orderRef, "no");
+      await updateOrderStatusInDB(orderRef, "no");
+      console.log(`✅ Order ${orderRef} status set to 'no' locally`);
+    }
+    return res.sendFile(path.join(__dirname, "reject.html"));
   } catch (e) {
-    console.error(`❌ Error updating via API: ${e.message}`);
+    console.error(`❌ Error in reject link flow: ${e.message}`);
+    res.status(500).send("Internal Server Error");
+  } finally {
+    if (connection) connection.release();
   }
-  return res.sendFile(path.join(__dirname, "reject.html"));
 });
 
 app.get("/api/sendMessage/:phone", async (req, res) => {
