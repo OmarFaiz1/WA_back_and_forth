@@ -195,24 +195,42 @@ function formatCxGenieResponse(response) {
   // Ensure the data field is a string
   const rawResponse = typeof response.data.data === "string" ? response.data.data : String(response.data.data);
 
-  const MAX_MESSAGE_LENGTH = 4096;
+  // Strip all HTML tags and decode HTML entities
+  let formattedResponse = rawResponse
+    .replace(/<[^>]+>/g, "") // Remove all HTML tags
+    .replace(/&nbsp;/g, " ") // Replace non-breaking spaces
+    .replace(/&amp;/g, "&") // Decode &amp; to &
+    .replace(/&lt;/g, "<") // Decode &lt; to <
+    .replace(/&gt;/g, ">") // Decode &gt; to >
+    .replace(/&quot;/g, "\"") // Decode &quot; to "
+    .replace(/&#39;/g, "'") // Decode &#39; to '
+    .replace(/\\n/g, "\n") // Convert \n to actual newlines
+    .replace(/\n\s*\n/g, "\n") // Remove excessive newlines
+    .trim(); // Remove leading/trailing whitespace
+
+  const MAX_MESSAGE_LENGTH = 4096; // WhatsApp message length limit
   let messages = [];
-  // Remove HTML tags and normalize newlines
-  let formattedResponse = rawResponse.replace(/<strong>|<\/strong>/g, "").replace(/\\n/g, "\n");
-  
+
+  // Split the response into chunks if it exceeds MAX_MESSAGE_LENGTH
   while (formattedResponse.length > 0) {
     if (formattedResponse.length <= MAX_MESSAGE_LENGTH) {
       messages.push(formattedResponse);
       formattedResponse = "";
     } else {
+      // Find the last newline before MAX_MESSAGE_LENGTH
       let splitIndex = formattedResponse.lastIndexOf("\n", MAX_MESSAGE_LENGTH);
       if (splitIndex === -1) {
-        splitIndex = MAX_MESSAGE_LENGTH;
+        // If no newline, find the last space to avoid splitting words
+        splitIndex = formattedResponse.lastIndexOf(" ", MAX_MESSAGE_LENGTH);
+        if (splitIndex === -1) {
+          splitIndex = MAX_MESSAGE_LENGTH; // Fallback to hard cut
+        }
       }
-      messages.push(formattedResponse.slice(0, splitIndex));
+      messages.push(formattedResponse.slice(0, splitIndex).trim());
       formattedResponse = formattedResponse.slice(splitIndex).trim();
     }
   }
+
   return messages.length > 0 ? messages : ["No details available."];
 }
 
@@ -1337,6 +1355,19 @@ app.get("/api/status", (req, res) => {
   console.log("🔍 Health check requested");
   res.json({ status: "ok" });
 });
+
+//-------------------------//
+
+
+
+// Health check endpoint
+app.get("/health", async (req, res) => {
+  console.log("🔍 Health check requested");
+  res.json({ status: "healthy" });
+});
+
+//------------------------//
+
 
 app.get("/confirm/:orderRef", async (req, res) => {
   const { orderRef } = req.params;
