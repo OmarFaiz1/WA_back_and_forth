@@ -90,7 +90,7 @@ ${noteUrl}
 *Note*: This option is available for the next ${NOTE_EDIT_WINDOW_HOURS} hours from your order confirmation.
 
 Best regards,
-[Your Company Name]
+[ZARPOSH]
 `;
 };
 
@@ -107,7 +107,7 @@ Regarding your order *${order.order_ref_number}* (PKR *${order.amount}*), we hav
 Please contact us if you have any questions or need further assistance.
 
 Best regards,
-[Your Company Name]
+Zarposh
 `;
 };
 
@@ -122,7 +122,7 @@ We are updating the delivery timeline for your order *${order.order_ref_number}*
 We apologize for any inconvenience and appreciate your understanding. Please contact us if you have any questions.
 
 Best regards,
-[Your Company Name]
+Zarposh
 `;
 };
 
