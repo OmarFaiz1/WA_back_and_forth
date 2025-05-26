@@ -391,56 +391,66 @@ async function initializeWhatsAppClient() {
     });
 
     waClient.on("message", async (message) => {
-      let senderName = "Unknown";
-      try {
-        const contact = await message.getContact();
-        senderName = contact.pushname || contact.name || "Unknown";
-      } catch (error) {
-        console.error(`❌ Error fetching sender name: ${error.message}`);
-      }
-      const phoneNumber = message.from.split("@")[0];
-      console.log("📥 New incoming message received:");
-      console.log(`  ↳ From: ${phoneNumber} (${senderName})`);
-      console.log(`  ↳ Timestamp: ${new Date().toISOString()}`);
-      if (message.hasMedia) {
-        console.log(`🖼️ Message contains media (likely an image)`);
-        imageProcessingQueue.push({ message, senderName, phoneNumber });
-        processImageQueue();
-      } else {
-        console.log(`  ↳ Body: ${message.body}`);
-        const apiResponse = await sendToCxGenieApi({
-          content: message.body,
-          senderName,
-          phoneNumber,
-        });
-        if (apiResponse) {
-          const replyTexts = formatCxGenieResponse(apiResponse);
-          for (const replyText of replyTexts) {
-            const sentMessage = await waClient.sendMessage(message.from, replyText);
-            console.log(`📤 Sent API response to ${phoneNumber} (${senderName})`);
-          }
-        } else {
-          const sentMessage = await waClient.sendMessage(
-            message.from,
-            "Sorry, I couldn't retrieve the details. Please try again."
-          );
-          console.log(`📤 Sent fallback message to ${phoneNumber} (${senderName})`);
+  let senderName = "Unknown";
+  try {
+    const contact = await message.getContact();
+    senderName = contact.pushname || contact.name || "Unknown";
+  } catch (error) {
+    console.error(`❌ Error fetching sender name: ${error.message}`);
+  }
+  const phoneNumber = message.from.split("@")[0];
+  console.log("📥 New incoming message received:");
+  console.log(`  ↳ From: ${phoneNumber} (${senderName})`);
+  console.log(`  ↳ Timestamp: ${new Date().toISOString()}`);
+
+  try {
+    if (message.hasMedia) {
+      console.log(`🖼️ Message contains media (likely an image)`);
+      imageProcessingQueue.push({ message, senderName, phoneNumber });
+      await processImageQueue();
+    } else {
+      console.log(`  ↳ Body: ${message.body}`);
+      const replyTexts = await sendToCxGenieApi({
+        content: message.body,
+        senderName,
+        phoneNumber,
+      });
+      for (const replyText of replyTexts) {
+        try {
+          await waClient.sendMessage(message.from, replyText);
+          console.log(`📤 Sent message to ${phoneNumber} (${senderName}): ${replyText}`);
+        } catch (sendError) {
+          console.error(`❌ Error sending message to ${phoneNumber}: ${sendError.message}`);
         }
       }
-      try {
-        const [rows] = await pool.query(
-          "SELECT * FROM testingTrialAcc WHERE phone LIKE ? ORDER BY order_ref_number DESC LIMIT 1",
-          [phoneNumber + "%"]
-        );
-        if (rows.length > 0) {
-          console.log(`✅ Sender ${phoneNumber} (${senderName}) is associated with order: ${rows[0].order_ref_number}`);
-        } else {
-          console.log(`⚠️ Sender ${phoneNumber} (${senderName}) is not associated with any known order.`);
-        }
-      } catch (error) {
-        console.error(`❌ Error checking sender in database: ${error.message}`);
-      }
-    });
+    }
+  } catch (error) {
+    console.error(`❌ Error processing message from ${phoneNumber}: ${error.message}`);
+    try {
+      await waClient.sendMessage(
+        message.from,
+        "Sorry, an error occurred. Please try again."
+      );
+      console.log(`📤 Sent fallback message to ${phoneNumber} (${senderName})`);
+    } catch (sendError) {
+      console.error(`❌ Error sending fallback message to ${phoneNumber}: ${sendError.message}`);
+    }
+  }
+
+  try {
+    const [rows] = await pool.query(
+      "SELECT * FROM testingTrialAcc WHERE phone = ? ORDER BY order_ref_number DESC LIMIT 1",
+      [phoneNumber]
+    );
+    if (rows.length > 0) {
+      console.log(`✅ Sender ${phoneNumber} (${senderName}) is associated with order: ${rows[0].order_ref_number}`);
+    } else {
+      console.log(`⚠️ Sender ${phoneNumber} (${senderName}) is not associated with any known order.`);
+    }
+  } catch (error) {
+    console.error(`❌ Error checking sender in database: ${error.message}`);
+  }
+});
 
     await waClient.initialize();
     console.log("✅ WhatsApp client initialization completed");
