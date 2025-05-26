@@ -184,40 +184,49 @@ async function retryRequest(fn, retries = 3, delay = 1000) {
   }
 }
 
+// Format the CX Genie API response
 function formatCxGenieResponse(response) {
-  if (!response || !response.data) {
+  // Check if response or response.data is missing or invalid
+  if (!response || !response.data || !response.data.data) {
+    console.error("Invalid response structure:", response ? JSON.stringify(response.data, null, 2) : "No response");
     return ["Sorry, I couldn't find any details."];
   }
+
+  // Ensure the data field is a string
+  const rawResponse = typeof response.data.data === "string" ? response.data.data : String(response.data.data);
+
   const MAX_MESSAGE_LENGTH = 4096;
   let messages = [];
-  let rawResponse = response.data.replace(/<strong>|<\/strong>/g, "");
-  rawResponse = rawResponse.replace(/\\n/g, "\n");
-  while (rawResponse.length > 0) {
-    if (rawResponse.length <= MAX_MESSAGE_LENGTH) {
-      messages.push(rawResponse);
-      rawResponse = "";
+  // Remove HTML tags and normalize newlines
+  let formattedResponse = rawResponse.replace(/<strong>|<\/strong>/g, "").replace(/\\n/g, "\n");
+  
+  while (formattedResponse.length > 0) {
+    if (formattedResponse.length <= MAX_MESSAGE_LENGTH) {
+      messages.push(formattedResponse);
+      formattedResponse = "";
     } else {
-      let splitIndex = rawResponse.lastIndexOf("\n", MAX_MESSAGE_LENGTH);
+      let splitIndex = formattedResponse.lastIndexOf("\n", MAX_MESSAGE_LENGTH);
       if (splitIndex === -1) {
         splitIndex = MAX_MESSAGE_LENGTH;
       }
-      messages.push(rawResponse.slice(0, splitIndex));
-      rawResponse = rawResponse.slice(splitIndex).trim();
+      messages.push(formattedResponse.slice(0, splitIndex));
+      formattedResponse = formattedResponse.slice(splitIndex).trim();
     }
   }
   return messages.length > 0 ? messages : ["No details available."];
 }
 
-async function sendToCxGenieApi({ content, senderName, phoneNumber }) {
+// Send message to CX Genie API and get response
+async function sendToCxGenieApi({ content, senderName = "Unknown", phoneNumber = "" }) {
   try {
     const payload = {
       bot_id: CX_GENIE_BOT_ID,
-      media: [],
+      media: [{ url: "string" }], // Match API docs payload
       content: content || "",
       chat_user: {
-        name: senderName || "Unknown",
-        email: "",
-        phone_number: phoneNumber || "",
+        name: senderName,
+        email: "default@example.com", // Add default email to match API requirements
+        phone_number: phoneNumber,
       },
       workspace_token: CX_GENIE_WORKSPACE_TOKEN,
       metadata: {},
@@ -233,11 +242,15 @@ async function sendToCxGenieApi({ content, senderName, phoneNumber }) {
       });
       return res;
     });
-    console.log(`✅ CX Genie API response: Status ${response.status}`);
-    return response.data;
+    console.log(`✅ CX Genie API response: Status ${response.status}`, JSON.stringify(response.data, null, 2));
+    const replyTexts = formatCxGenieResponse(response);
+    return replyTexts;
   } catch (error) {
-    console.error(`❌ Error sending to CX Genie API: ${error.message}`);
-    return null;
+    console.error(
+      `❌ Error sending to CX Genie API: ${error.message}`,
+      error.response ? JSON.stringify(error.response.data, null, 2) : "No response data"
+    );
+    return ["Sorry, I couldn't retrieve the details. Please try again."];
   }
 }
 
