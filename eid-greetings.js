@@ -11,6 +11,7 @@ const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const http = require("http");
 const { Server } = require("socket.io");
+const FormData = require("form-data");
 const {
   emitOrdersUpdate,
   decrementDeliveryTimes,
@@ -56,7 +57,18 @@ const DB_CONFIG = {
   queueLimit: 0,
 };
 
-const BASE_URL = "https://wa-order-portal.onrender.com";
+const BASE_URL = "https://wa-back-and-forth.onrender.com";
+
+// API Configuration
+const CX_GENIE_API_URL = "https://gateway.cxgenie.ai/api/v1/messages";
+const CX_GENIE_BOT_ID = "addb60ab-9f77-4f14-af7e-f398ec73ca57";
+const CX_GENIE_WORKSPACE_TOKEN =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ3b3Jrc3BhY2VfaWQiOiI3MzY4ZGEwNi05Y2M2LTRlN2MtODJmOC0yMDdkYTM4YjVlMTIiLCJpYXQiOjE3NDQwODkwMDN9.G3ospWG5KoNL7l4ZygvAwhM4lV3_hApc8iSQWptgjDM";
+const PREDICTION_API_URL = "https://imagexclassifier-1.onrender.com/api/predict";
+
+// Image Processing Queue
+const imageProcessingQueue = [];
+let isProcessingImages = false;
 
 // Message Templates
 const MESSAGE_TEXT_TEMPLATE = (order) => {
@@ -90,7 +102,7 @@ ${noteUrl}
 *Note*: This option is available for the next ${NOTE_EDIT_WINDOW_HOURS} hours from your order confirmation.
 
 Best regards,
-[ZARPOSH]
+[Your Company Name]
 `;
 };
 
@@ -107,7 +119,7 @@ Regarding your order *${order.order_ref_number}* (PKR *${order.amount}*), we hav
 Please contact us if you have any questions or need further assistance.
 
 Best regards,
-Zarposh
+[Your Company Name]
 `;
 };
 
@@ -122,7 +134,7 @@ We are updating the delivery timeline for your order *${order.order_ref_number}*
 We apologize for any inconvenience and appreciate your understanding. Please contact us if you have any questions.
 
 Best regards,
-Zarposh
+[Your Company Name]
 `;
 };
 
@@ -150,9 +162,170 @@ let isClientReady = false;
 let qrCode = null;
 let qrExpiryTimer = null;
 
+// Utility Functions
+async function retryRequest(fn, retries = 3, delay = 1000) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      console.log(`[${new Date().toISOString()}] Attempt ${attempt} of ${retries}`);
+      return await fn();
+    } catch (error) {
+      if (
+        attempt === retries ||
+        !error.response ||
+        (error.response.status !== 502 && error.response.status < 500)
+      ) {
+        throw error;
+      }
+      console.log(
+        `[${new Date().toISOString()}] Attempt ${attempt} failed: ${error.message}. Retrying in ${delay}ms...`
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
+function formatCxGenieResponse(response) {
+  if (!response || !response.data) {
+    return ["Sorry, I couldn't find any details."];
+  }
+  const MAX_MESSAGE_LENGTH = 4096;
+  let messages = [];
+  let rawResponse = response.data.replace(/<strong>|<\/strong>/g, "");
+  rawResponse = rawResponse.replace(/\\n/g, "\n");
+  while (rawResponse.length > 0) {
+    if (rawResponse.length <= MAX_MESSAGE_LENGTH) {
+      messages.push(rawResponse);
+      rawResponse = "";
+    } else {
+      let splitIndex = rawResponse.lastIndexOf("\n", MAX_MESSAGE_LENGTH);
+      if (splitIndex === -1) {
+        splitIndex = MAX_MESSAGE_LENGTH;
+      }
+      messages.push(rawResponse.slice(0, splitIndex));
+      rawResponse = rawResponse.slice(splitIndex).trim();
+    }
+  }
+  return messages.length > 0 ? messages : ["No details available."];
+}
+
+async function sendToCxGenieApi({ content, senderName, phoneNumber }) {
+  try {
+    const payload = {
+      bot_id: CX_GENIE_BOT_ID,
+      media: [],
+      content: content || "",
+      chat_user: {
+        name: senderName || "Unknown",
+        email: "",
+        phone_number: phoneNumber || "",
+      },
+      workspace_token: CX_GENIE_WORKSPACE_TOKEN,
+      metadata: {},
+    };
+    console.log(`📤 Sending to CX Genie API:`, JSON.stringify(payload, null, 2));
+    const response = await retryRequest(async () => {
+      const res = await axios.post(CX_GENIE_API_URL, payload, {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${CX_GENIE_WORKSPACE_TOKEN}`,
+        },
+        timeout: 60000,
+      });
+      return res;
+    });
+    console.log(`✅ CX Genie API response: Status ${response.status}`);
+    return response.data;
+  } catch (error) {
+    console.error(`❌ Error sending to CX Genie API: ${error.message}`);
+    return null;
+  }
+}
+
+async function sendToPredictionApi(imageBuffer, mimeType) {
+  try {
+    console.log(`[${new Date().toISOString()}] Preparing FormData for Prediction API`);
+    const form = new FormData();
+    form.append("test_image", imageBuffer, {
+      filename: "image.jpg",
+      contentType: mimeType || "image/jpeg",
+    });
+    const predictResponse = await retryRequest(async () => {
+      console.log(`[${new Date().toISOString()}] Sending image to Prediction API`);
+      const res = await axios.post(PREDICTION_API_URL, form, {
+        headers: form.getHeaders(),
+        timeout: 120000,
+      });
+      return res;
+    });
+    console.log(`[${new Date().toISOString()}] Prediction API response:`, JSON.stringify(predictResponse.data, null, 2));
+    return predictResponse.data;
+  } catch (error) {
+    console.error(`❌ Error sending to Prediction API: ${error.message}`);
+    return null;
+  }
+}
+
+async function processImageQueue() {
+  if (isProcessingImages || imageProcessingQueue.length === 0) return;
+  isProcessingImages = true;
+  while (imageProcessingQueue.length > 0) {
+    const { message, senderName, phoneNumber } = imageProcessingQueue.shift();
+    try {
+      const media = await message.downloadMedia();
+      if (media) {
+        console.log(`✅ Media downloaded for ${phoneNumber} (${senderName})`);
+        const imageBuffer = Buffer.from(media.data, "base64");
+        const predictData = await sendToPredictionApi(imageBuffer, media.mimetype);
+        if (predictData && predictData.result) {
+          const predictedName = predictData.result;
+          console.log(`[${new Date().toISOString()}] Predicted name: ${predictedName}`);
+          const query = `Tell me price,description,link about ${predictedName}`;
+          const apiResponse = await sendToCxGenieApi({
+            content: query,
+            senderName,
+            phoneNumber,
+          });
+          if (apiResponse) {
+            const replyTexts = formatCxGenieResponse(apiResponse);
+            for (const replyText of replyTexts) {
+              const sentMessage = await waClient.sendMessage(message.from, replyText);
+              console.log(`📤 Sent API response to ${phoneNumber} (${senderName})`);
+            }
+          } else {
+            const sentMessage = await waClient.sendMessage(
+              message.from,
+              "Sorry, I couldn't retrieve the details. Please try again."
+            );
+            console.log(`📤 Sent fallback message to ${phoneNumber} (${senderName})`);
+          }
+        } else {
+          const sentMessage = await waClient.sendMessage(
+            message.from,
+            "Sorry, I couldn't identify the item in the image. Please try again."
+          );
+          console.log(`📤 Sent fallback message to ${phoneNumber} (${senderName})`);
+        }
+      } else {
+        const sentMessage = await waClient.sendMessage(
+          message.from,
+          "Sorry, I couldn't process the image. Please try again."
+        );
+        console.log(`📤 Sent fallback message to ${phoneNumber} (${senderName})`);
+      }
+    } catch (error) {
+      console.error(`❌ Error processing image for ${phoneNumber}: ${error.message}`);
+      const sentMessage = await waClient.sendMessage(
+        message.from,
+        "Sorry, an error occurred while processing your image. Please try again."
+      );
+      console.log(`📤 Sent fallback message to ${phoneNumber} (${senderName})`);
+    }
+  }
+  isProcessingImages = false;
+}
+
 async function initializeWhatsAppClient() {
   console.log("🔄 Initializing WhatsApp client...");
-  
   try {
     waClient = new Client({
       authStrategy: new LocalAuth({ clientId: "order-confirmation-sender" }),
@@ -178,8 +351,6 @@ async function initializeWhatsAppClient() {
       qrcode.generate(qr, { small: false, margin: 2 }, (code) => {
         console.log(code);
       });
-
-      // Set QR code expiry
       if (qrExpiryTimer) clearTimeout(qrExpiryTimer);
       qrExpiryTimer = setTimeout(() => {
         console.log("⏰ QR code expired. Generating a new one...");
@@ -206,6 +377,58 @@ async function initializeWhatsAppClient() {
       initializeWhatsAppClient();
     });
 
+    waClient.on("message", async (message) => {
+      let senderName = "Unknown";
+      try {
+        const contact = await message.getContact();
+        senderName = contact.pushname || contact.name || "Unknown";
+      } catch (error) {
+        console.error(`❌ Error fetching sender name: ${error.message}`);
+      }
+      const phoneNumber = message.from.split("@")[0];
+      console.log("📥 New incoming message received:");
+      console.log(`  ↳ From: ${phoneNumber} (${senderName})`);
+      console.log(`  ↳ Timestamp: ${new Date().toISOString()}`);
+      if (message.hasMedia) {
+        console.log(`🖼️ Message contains media (likely an image)`);
+        imageProcessingQueue.push({ message, senderName, phoneNumber });
+        processImageQueue();
+      } else {
+        console.log(`  ↳ Body: ${message.body}`);
+        const apiResponse = await sendToCxGenieApi({
+          content: message.body,
+          senderName,
+          phoneNumber,
+        });
+        if (apiResponse) {
+          const replyTexts = formatCxGenieResponse(apiResponse);
+          for (const replyText of replyTexts) {
+            const sentMessage = await waClient.sendMessage(message.from, replyText);
+            console.log(`📤 Sent API response to ${phoneNumber} (${senderName})`);
+          }
+        } else {
+          const sentMessage = await waClient.sendMessage(
+            message.from,
+            "Sorry, I couldn't retrieve the details. Please try again."
+          );
+          console.log(`📤 Sent fallback message to ${phoneNumber} (${senderName})`);
+        }
+      }
+      try {
+        const [rows] = await pool.query(
+          "SELECT * FROM testingTrialAcc WHERE phone LIKE ? ORDER BY order_ref_number DESC LIMIT 1",
+          [phoneNumber + "%"]
+        );
+        if (rows.length > 0) {
+          console.log(`✅ Sender ${phoneNumber} (${senderName}) is associated with order: ${rows[0].order_ref_number}`);
+        } else {
+          console.log(`⚠️ Sender ${phoneNumber} (${senderName}) is not associated with any known order.`);
+        }
+      } catch (error) {
+        console.error(`❌ Error checking sender in database: ${error.message}`);
+      }
+    });
+
     await waClient.initialize();
     console.log("✅ WhatsApp client initialization completed");
   } catch (err) {
@@ -214,7 +437,6 @@ async function initializeWhatsAppClient() {
   }
 }
 
-// Utility: Wait for client readiness with timeout
 async function waitForClientReady(timeoutMs = 60000) {
   console.log("⏳ Waiting for WhatsApp client to be ready...");
   const startTime = Date.now();
@@ -228,7 +450,6 @@ async function waitForClientReady(timeoutMs = 60000) {
   console.log("✅ WhatsApp client is ready");
 }
 
-// Utility: Convert phone number
 function convertPhone(phone) {
   console.log(`🔍 Converting phone number: ${phone}`);
   if (phone.startsWith("0")) {
@@ -240,7 +461,6 @@ function convertPhone(phone) {
   return phone;
 }
 
-// Send order confirmation message
 async function sendOrderConfirmationMessage(order, retries = 3) {
   console.log(`📩 Preparing to send confirmation message for order ${order.order_ref_number}`);
   let attempt = 1;
@@ -279,7 +499,6 @@ async function sendOrderConfirmationMessage(order, retries = 3) {
   return false;
 }
 
-// Send note reminder message
 async function sendNoteReminderMessage(order, retries = 3) {
   console.log(`📬 Preparing to send note reminder for order ${order.order_ref_number}`);
   let attempt = 1;
@@ -316,7 +535,6 @@ async function sendNoteReminderMessage(order, retries = 3) {
   return false;
 }
 
-// Send agent feedback message
 async function sendAgentFeedbackMessage(order, customerNote, agentMessage, retries = 3) {
   console.log(`📩 Preparing to send agent feedback for order ${order.order_ref_number}`);
   let attempt = 1;
@@ -353,7 +571,6 @@ async function sendAgentFeedbackMessage(order, customerNote, agentMessage, retri
   return false;
 }
 
-// Send delivery update message
 async function sendDeliveryUpdateMessage(order, newDeliveryTime, reason, retries = 3) {
   console.log(`🚚 Preparing to send delivery update for order ${order.order_ref_number}`);
   let attempt = 1;
@@ -390,7 +607,6 @@ async function sendDeliveryUpdateMessage(order, newDeliveryTime, reason, retries
   return false;
 }
 
-// Send cancellation message
 async function sendCancellationMessage(order, reason, retries = 3) {
   console.log(`🚨 Preparing to send cancellation message for order ${order.order_ref_number}`);
   let attempt = 1;
@@ -427,7 +643,6 @@ async function sendCancellationMessage(order, reason, retries = 3) {
   return false;
 }
 
-// Listen for order reply
 function listenForOrderReply(contact, order) {
   const replyListener = (message) => {
     if (message.from === contact.id._serialized) {
@@ -447,7 +662,6 @@ function listenForOrderReply(contact, order) {
   }, 60000);
 }
 
-// Update order status in DB
 async function updateOrderStatusInDB(orderRefNumber, newStatus) {
   let connection;
   try {
@@ -457,7 +671,7 @@ async function updateOrderStatusInDB(orderRefNumber, newStatus) {
       [newStatus, orderRefNumber]
     );
     console.log(`✅ Order ${orderRefNumber} status updated in DB to "${newStatus}"`);
-    await emitOrdersUpdate(io, pool); // Notify clients
+    await emitOrdersUpdate(io, pool);
   } catch (error) {
     console.error(`❌ Error updating order ${orderRefNumber} status in DB: ${error.message}`);
   } finally {
@@ -465,7 +679,6 @@ async function updateOrderStatusInDB(orderRefNumber, newStatus) {
   }
 }
 
-// Mark message sent
 async function updateOrderMessageSent(orderRefNumber) {
   let connection;
   try {
@@ -482,7 +695,6 @@ async function updateOrderMessageSent(orderRefNumber) {
   }
 }
 
-// Increment last message counter
 async function incrementLastMessageCounter(orderRefNumber) {
   let connection;
   try {
@@ -499,7 +711,6 @@ async function incrementLastMessageCounter(orderRefNumber) {
   }
 }
 
-// Save or update custom note
 async function saveCustomNote(orderRefNumber, note) {
   let connection;
   try {
@@ -529,7 +740,6 @@ async function saveCustomNote(orderRefNumber, note) {
   }
 }
 
-// Get custom note
 async function getCustomNote(orderRefNumber) {
   let connection;
   try {
@@ -548,22 +758,18 @@ async function getCustomNote(orderRefNumber) {
   }
 }
 
-// Check if note editing is allowed
 async function canEditNote(orderRefNumber) {
   let connection;
   try {
     connection = await pool.getConnection();
-    // Check if a note exists in CustomNotes
     const [noteRows] = await connection.query(
       "SELECT created_at FROM CustomNotes WHERE order_ref_number = ?",
       [orderRefNumber]
     );
     let createdAt;
     if (noteRows.length > 0) {
-      // Use CustomNotes.created_at for existing notes
       createdAt = new Date(noteRows[0].created_at);
     } else {
-      // For new notes, use testingTrialAcc.created_at
       const [orderRows] = await connection.query(
         "SELECT created_at FROM testingTrialAcc WHERE order_ref_number = ?",
         [orderRefNumber]
@@ -587,7 +793,6 @@ async function canEditNote(orderRefNumber) {
   }
 }
 
-// Update order status via API
 async function updateOrderStatusViaAPI(orderRefNumber, status) {
   const apiBaseUrl = BASE_URL + "/api";
   const apiKey = process.env.API_KEY || "fastians";
@@ -609,7 +814,6 @@ async function updateOrderStatusViaAPI(orderRefNumber, status) {
   }
 }
 
-// Fetch Shopify orders
 async function fetchShopifyOrders() {
   try {
     console.log("🔄 Fetching orders from Shopify...");
@@ -631,7 +835,6 @@ async function fetchShopifyOrders() {
   }
 }
 
-// Process new Shopify orders
 async function processNewShopifyOrders() {
   let connection;
   try {
@@ -649,16 +852,14 @@ async function processNewShopifyOrders() {
         [orderRefNumber]
       );
       if (rows.length === 0) {
-        // Clean the phone number by removing non-digits
         let phone = order.shipping_address && order.shipping_address.phone
-          ? order.shipping_address.phone.replace(/\D/g, '') // Remove all non-digits (e.g., "+", spaces)
+          ? order.shipping_address.phone.replace(/\D/g, '')
           : null;
-        // Validate the cleaned phone number
         if (phone && phone.match(/^\d{10,12}$/)) {
           console.log(`✅ Valid phone number for order ${orderRefNumber}: ${phone}`);
         } else {
           console.warn(`⚠️ Invalid or missing phone number for order ${orderRefNumber}, using default. Raw phone: ${order.shipping_address?.phone}`);
-          phone = '0000000000'; // Default value to satisfy NOT NULL constraint
+          phone = '0000000000';
         }
         const insertData = {
           order_ref_number: orderRefNumber,
@@ -710,7 +911,6 @@ async function processNewShopifyOrders() {
   }
 }
 
-// Schedule note reminders
 async function scheduleNoteReminders() {
   console.log("🔄 Checking for orders to send note reminders...");
   let connection;
@@ -741,7 +941,6 @@ async function scheduleNoteReminders() {
   }
 }
 
-// Full Shopify-MySQL sync
 async function syncShopifyOrders(pool) {
   console.log("🔄 Starting Shopify-MySQL sync process...");
   let connection;
@@ -765,18 +964,17 @@ async function syncShopifyOrders(pool) {
       if (order.shipping_address && order.shipping_address.city) {
         city = order.shipping_address.city;
       }
-      // Clean the phone number by removing non-digits
       if (order.shipping_address && order.shipping_address.phone) {
-        phone = order.shipping_address.phone.replace(/\D/g, ''); // Remove all non-digits
+        phone = order.shipping_address.phone.replace(/\D/g, '');
         if (!phone.match(/^\d{10,12}$/)) {
           console.warn(`⚠️ Invalid phone number for order ${order.order_number}, using default. Raw phone: ${order.shipping_address.phone}`);
-          phone = '0000000000'; // Default value to satisfy NOT NULL constraint
+          phone = '0000000000';
         } else {
           console.log(`✅ Valid phone number for order ${order.order_number}: ${phone}`);
         }
       } else {
         console.warn(`⚠️ Missing phone number for order ${order.order_number}, using default.`);
-        phone = '0000000000'; // Default value to satisfy NOT NULL constraint
+        phone = '0000000000';
       }
       return {
         order_ref_number: parseInt(order.order_number),
@@ -867,7 +1065,6 @@ async function syncShopifyOrders(pool) {
   }
 }
 
-// Check for resend messages
 async function checkForResendMessages() {
   let connection;
   try {
@@ -893,7 +1090,6 @@ async function checkForResendMessages() {
   }
 }
 
-// Order Portal Routes
 app.get("/api/orders", async (req, res) => {
   const filter = req.query.filter || "all";
   const deliveryTime = req.query.deliveryTime;
@@ -1109,13 +1305,11 @@ app.post("/api/order/:order_ref_number/agent-feedback", async (req, res) => {
   }
 });
 
-// Serve Order Portal Frontend
 app.get("/", (req, res) => {
   console.log("📄 Serving order portal frontend");
   res.sendFile(path.join(__dirname, "orderPortalSystem", "index.html"));
 });
 
-// WhatsApp Automation Routes
 app.get("/api/status", (req, res) => {
   console.log("🔍 Health check requested");
   res.json({ status: "ok" });
@@ -1127,7 +1321,7 @@ app.get("/confirm/:orderRef", async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
-    const [orderResults] = await pool.query(
+    const [orderResults] = await connection.query(
       "SELECT status, created_at FROM testingTrialAcc WHERE order_ref_number = ?",
       [orderRef]
     );
@@ -1162,7 +1356,7 @@ app.get("/reject/:orderRef", async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
-    const [orderResults] = await pool.query(
+    const [orderResults] = await connection.query(
       "SELECT status, created_at FROM testingTrialAcc WHERE order_ref_number = ?",
       [orderRef]
     );
@@ -1228,17 +1422,45 @@ app.get("/api/sendMessage/:phone", async (req, res) => {
   }
 });
 
-// Log uncaught exceptions
+app.post("/api/sendCustomMessage", async (req, res) => {
+  const { phone, message } = req.body;
+  console.log(`📥 Received custom message request: phone=${phone}, message=${message}`);
+  if (!phone || !message) {
+    console.log(`❌ Missing phone or message in request`);
+    return res.status(400).json({ error: "Phone and message are required" });
+  }
+  let cleanedPhone = phone.trim();
+  if (!cleanedPhone.match(/^(?:92)?\d{10}$/)) {
+    console.log(`❌ Invalid phone number format: ${cleanedPhone}`);
+    return res.status(400).json({ error: "Invalid phone number format" });
+  }
+  try {
+    await waitForClientReady();
+    cleanedPhone = convertPhone(cleanedPhone);
+    const waId = `${cleanedPhone}@c.us`;
+    console.log(`📤 Sending custom message to ${cleanedPhone}`);
+    const sentMessage = await waClient.sendMessage(waId, message);
+    if (sentMessage) {
+      console.log(`✅ Custom message sent successfully to ${cleanedPhone}`);
+      res.json({ message: "Custom message sent successfully" });
+    } else {
+      console.log(`❌ Failed to send custom message to ${cleanedPhone}`);
+      res.status(500).json({ error: "Failed to send custom message" });
+    }
+  } catch (error) {
+    console.error(`❌ Error sending custom message to ${cleanedPhone}: ${error.message}`);
+    res.status(500).json({ error: `Failed to send message: ${error.message}` });
+  }
+});
+
 process.on("uncaughtException", (err) => {
   console.error(`❌ Uncaught Exception: ${err.message}`, err.stack);
 });
 
-// Log unhandled promise rejections
 process.on("unhandledRejection", (reason, promise) => {
   console.error(`❌ Unhandled Rejection at: ${promise} reason: ${reason}`);
 });
 
-// Log Socket.IO connection events
 io.on("connection", (socket) => {
   console.log(`🔗 Socket connected: ${socket.id}`);
   socket.on("disconnect", (reason) => {
@@ -1249,18 +1471,15 @@ io.on("connection", (socket) => {
   });
 });
 
-// Health check endpoint
 app.get("/health", async (req, res) => {
   console.log("🔍 Health check requested");
   res.json({ status: "healthy" });
 });
 
-// Start server
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
 
-// Start periodic tasks
 initializeWhatsAppClient()
   .then(() => {
     console.log("🔄 Starting periodic tasks...");
@@ -1276,7 +1495,6 @@ initializeWhatsAppClient()
     process.exit(1);
   });
 
-// Handle graceful shutdown
 process.on("SIGINT", async () => {
   console.log("🔄 Gracefully shutting down...");
   if (waClient) {

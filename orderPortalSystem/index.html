@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Orders Portal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+      let currentFilter = "all";
+      let currentDeliveryTime = null;
+      let allOrders = [];
+      const socket = io({
+        transports: ["websocket", "polling"],
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000,
+      });
+
+      socket.on("connect", () => {
+        console.log("🔗 Socket.IO connected");
+      });
+
+      socket.on("orders_update", (data) => {
+        console.log(`📢 Real-time update received: ${data.length} orders`);
+        fetchOrders(currentFilter, currentDeliveryTime);
+      });
+
+      socket.on("disconnect", (reason) => {
+        console.log(`🔗 Socket.IO disconnected: ${reason}`);
+      });
+
+      socket.on("error", (error) => {
+        console.error("❌ Socket.IO error:", error);
+      });
+
+      function showNotification(message, isError = false) {
+        const notif = document.getElementById("notification");
+        notif.innerText = message;
+        notif.classList.remove("hidden", "bg-blue-600", "bg-red-500");
+        notif.classList.add(isError ? "bg-red-500" : "bg-blue-600");
+        setTimeout(() => {
+          notif.classList.add("hidden");
+        }, 5000);
+      }
+
+      function toggleNavbar() {
+        const menu = document.getElementById("navbar-menu");
+        menu.classList.toggle("hidden");
+      }
+
+      async function fetchOrders(filter = "all", deliveryTime = null) {
+        currentFilter = filter;
+        currentDeliveryTime = deliveryTime;
+        updateNavbarActive();
+        try {
+          let url = "/api/orders?filter=" + filter;
+          if (deliveryTime !== null && !isNaN(deliveryTime)) {
+            url += "&deliveryTime=" + deliveryTime;
+          }
+          console.log(`🔍 Fetching orders with URL: ${url}`);
+          const res = await fetch(url);
+          const data = await res.json();
+          if (data.error) {
+            console.error("❌ Error fetching orders:", data.error);
+            showNotification("Error fetching orders: " + data.error, true);
+            return;
+          }
+          console.log(`✅ Fetched ${data.orders.length} orders`);
+          allOrders = data.orders.map(order => ({
+            ...order,
+            order_ref_number: String(order.order_ref_number),
+            customer_name: String(order.customer_name)
+          }));
+          // Debug: Log any orders with invalid order_ref_number or customer_name
+          allOrders.forEach((order, index) => {
+            if (typeof order.order_ref_number !== "string" || typeof order.customer_name !== "string") {
+              console.warn(`⚠️ Malformed order at index ${index}:`, order);
+            }
+          });
+          populateTable(allOrders);
+        } catch (error) {
+          console.error("❌ Error fetching orders:", error);
+          showNotification("Error fetching orders: " + error.message, true);
+        }
+      }
+
+      function populateTable(orders) {
+        const tbody = document.getElementById("orders-tbody");
+        tbody.innerHTML = "";
+        if (orders.length === 0) {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `<td colspan="6" class="border px-4 py-2 text-sm text-gray-700 text-center">No orders found</td>`;
+          tbody.appendChild(tr);
+          return;
+        }
+        orders.forEach((order) => {
+          const tr = document.createElement("tr");
+          tr.classList.add("hover:bg-gray-50", "transition");
+          tr.innerHTML = `
+            <td class="border px-4 py-2 text-sm text-gray-700">${order.order_ref_number || "N/A"}</td>
+            <td class="border px-4 py-2 text-sm text-gray-700">${order.customer_name || "Unknown"}</td>
+            <td class="border px-4 py-2 text-sm text-gray-700">PKR ${order.amount || "0.00"}</td>
+            <td class="border px-4 py-2 text-sm ${order.status === 'yes' ? 'text-green-600' : 'text-red-600'}">${order.status === 'yes' ? '✔' : '❌'}</td>
+            <td class="border px-4 py-2 text-sm text-gray-700">${order.delivery_time ?? "N/A"}</td>
+            <td class="border px-4 py-2 flex flex-wrap gap-2">
+              <button class="bg-gradient-to-r from-gray-600 to-gray-700 hover:from-gray-700 hover:to-gray-800 text-white px-3 py-1 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="showDetails('${order.order_ref_number || ""}')">Details</button>
+              <button class="bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white px-3 py-1 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="openUpdateStatus('${order.order_ref_number || ""}', '${order.status || ""}')">Status</button>
+              <button class="bg-gradient-to-r from-yellow-600 to-yellow-700 hover:from-yellow-700 hover:to-yellow-800 text-white px-3 py-1 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="openUpdateDelivery('${order.order_ref_number || ""}', ${order.delivery_time ?? 0})">Delivery</button>
+              <button class="bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 text-white px-3 py-1 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="showCustomNote('${order.order_ref_number || ""}')">Notes</button>
+            </td>
+          `;
+          tbody.appendChild(tr);
+        });
+      }
+
+      function filterOrders(query) {
+        if (!query) {
+          populateTable(allOrders);
+          return;
+        }
+        const queryLower = String(query).toLowerCase();
+        const filteredOrders = allOrders.filter((order) => {
+          const ref = typeof order.order_ref_number === "string" ? order.order_ref_number.toLowerCase() : "";
+          const name = typeof order.customer_name === "string" ? order.customer_name.toLowerCase() : "";
+          return ref === queryLower || name.includes(queryLower);
+        });
+        populateTable(filteredOrders);
+      }
+
+      async function exportToCSV() {
+        const headers = ["Order Ref Number", "Customer Name", "Status", "Delivery Time", "Notes"];
+        const notesPromises = allOrders.map(order =>
+          fetch(`/api/order/${order.order_ref_number}/note`)
+            .then(res => res.json())
+            .then(data => data.note || "N/A")
+            .catch(() => "N/A")
+        );
+        const notes = await Promise.all(notesPromises);
+
+        const rows = allOrders.map((order, index) => [
+          order.order_ref_number || "N/A",
+          order.customer_name || "Unknown",
+          order.status || "Unknown",
+          order.delivery_time ?? "N/A",
+          notes[index]
+        ]);
+
+        let csvContent = headers.join(",") + "\n";
+        rows.forEach((row) => {
+          csvContent += row.map((cell) => `"${cell}"`).join(",") + "\n";
+        });
+
+        const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.setAttribute("href", url);
+        link.setAttribute("download", `orders_export_${new Date().toISOString().split("T")[0]}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+
+        showNotification("Orders exported successfully!");
+      }
+
+      async function showDetails(order_ref_number) {
+        if (!order_ref_number) {
+          showNotification("Invalid order reference number.", true);
+          return;
+        }
+        try {
+          console.log(`🔍 Fetching details for order ${order_ref_number}`);
+          
+          // Fetch order details from the database
+          const orderRes = await fetch(`/api/order/${order_ref_number}`);
+          const orderData = await orderRes.json();
+          if (orderData.error) {
+            throw new Error(orderData.error);
+          }
+          const order = orderData.order;
+
+          // Fetch custom note
+          const noteRes = await fetch(`/api/order/${order_ref_number}/note`);
+          const noteData = await noteRes.json();
+          if (noteData.error) {
+            throw new Error(noteData.error);
+          }
+          const note = noteData.note || "No custom note provided.";
+
+          // Populate the modal with order details and custom note
+          document.getElementById("detailContent").innerHTML = `
+            <p class="text-sm text-gray-700"><strong>Customer:</strong> ${order.customer_name || "Unknown"}</p>
+            <p class="text-sm text-gray-700"><strong>Phone:</strong> ${order.phone || "N/A"}</p>
+            <p class="text-sm text-gray-700"><strong>Total:</strong> PKR ${order.amount || "0.00"}</p>
+            <p class="text-sm text-gray-700"><strong>City:</strong> ${order.city || "N/A"}</p>
+            <p class="text-sm text-gray-700"><strong>Custom Note:</strong> ${note}</p>
+          `;
+          openModal("detailModal");
+          console.log(`✅ Displayed details for order ${order_ref_number}`);
+        } catch (error) {
+          console.error("❌ Error fetching order details:", error);
+          showNotification("Error fetching order details: " + error.message, true);
+        }
+      }
+
+      async function showCustomNote(order_ref_number) {
+        if (!order_ref_number) {
+          showNotification("Invalid order reference number.", true);
+          return;
+        }
+        try {
+          console.log(`🔍 Fetching custom note for order ${order_ref_number}`);
+          const res = await fetch(`/api/order/${order_ref_number}/note`);
+          const data = await res.json();
+          const note = data.note || "No custom note provided.";
+          document.getElementById("noteContent").innerHTML = `
+            <p class="mb-4 text-sm text-gray-700"><strong>Customer Note:</strong> ${note}</p>
+            <button class="bg-gradient-to-r from-yellow-600 to-yellow-700 hover:from-yellow-700 hover:to-yellow-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="openAgentFeedback('${order_ref_number}')">Send Feedback</button>
+          `;
+          openModal("noteModal");
+          console.log(`✅ Displayed custom note for order ${order_ref_number}`);
+        } catch (error) {
+          console.error("❌ Error fetching custom note:", error);
+          showNotification("Error fetching custom note: " + error.message, true);
+        }
+      }
+
+      let currentOrderForFeedback = null;
+      function openAgentFeedback(order_ref_number) {
+        if (!order_ref_number) {
+          showNotification("Invalid order reference number.", true);
+          return;
+        }
+        currentOrderForFeedback = order_ref_number;
+        document.getElementById("agentFeedback").value = "";
+        openModal("agentFeedbackModal");
+        console.log(`🔄 Opened agent feedback modal for order ${order_ref_number}`);
+      }
+
+      async function submitAgentFeedback() {
+        const message = document.getElementById("agentFeedback").value.trim();
+        if (!message) {
+          showNotification("Please enter a feedback message.", true);
+          console.log("❌ No feedback message provided");
+          return;
+        }
+        try {
+          console.log(`📩 Submitting agent feedback for order ${currentOrderForFeedback}`);
+          const res = await fetch(`/api/order/${currentOrderForFeedback}/agent-feedback`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message }),
+          });
+          const data = await res.json();
+          if (res.ok) {
+            showNotification("Feedback sent successfully!");
+            closeModal("agentFeedbackModal");
+            closeModal("noteModal");
+            console.log(`✅ Agent feedback sent for order ${currentOrderForFeedback}`);
+          } else {
+            throw new Error(data.error || "Failed to send feedback");
+          }
+        } catch (error) {
+          console.error("❌ Error sending agent feedback:", error);
+          showNotification("Error sending feedback: " + error.message, true);
+        }
+      }
+
+      let currentOrderForStatus = null;
+      function openUpdateStatus(order_ref_number, currentStatus) {
+        if (!order_ref_number) {
+          showNotification("Invalid order reference number.", true);
+          return;
+        }
+        currentOrderForStatus = order_ref_number;
+        document.getElementById("statusSelect").value = currentStatus || "yes";
+        openModal("statusModal");
+        console.log(`🔄 Opened status update modal for order ${order_ref_number}`);
+      }
+
+      async function submitStatusUpdate() {
+        const newStatus = document.getElementById("statusSelect").value;
+        console.log(`🔄 Submitting status update for order ${currentOrderForStatus} to "${newStatus}"`);
+        if (newStatus === "no") {
+          openModal("cancellationReasonModal");
+        } else {
+          try {
+            const res = await fetch(`/api/order/${currentOrderForStatus}/update-status`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ status: newStatus }),
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            showNotification(`Status updated to ${newStatus}`);
+            closeModal("statusModal");
+            fetchOrders(currentFilter, currentDeliveryTime);
+            console.log(`✅ Status updated for order ${currentOrderForStatus} to "${newStatus}"`);
+          } catch (error) {
+            console.error("❌ Error updating status:", error);
+            showNotification("Error updating status: " + error.message, true);
+          }
+        }
+      }
+
+      async function submitCancellationReason() {
+        const reasonSelect = document.getElementById("cancellationReasonSelect").value;
+        const customReason = document.getElementById("customCancellationReason").value.trim();
+        const reason = reasonSelect === "custom" ? customReason : reasonSelect;
+        if (!reason) {
+          showNotification("Please select or enter a cancellation reason.", true);
+          console.log("❌ No cancellation reason provided");
+          return;
+        }
+        document.getElementById("confirmCancellationReasonText").innerText = reason;
+        closeModal("cancellationReasonModal");
+        openModal("confirmCancellationModal");
+        document.getElementById("confirmCancellationButton").onclick = async () => {
+          try {
+            console.log(`🔄 Confirming cancellation for order ${currentOrderForStatus} with reason: ${reason}`);
+            const res = await fetch(`/api/order/${currentOrderForStatus}/update-status`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ status: "no", cancellationReason: reason }),
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            showNotification("Status updated to no and message sent.");
+            closeModal("confirmCancellationModal");
+            closeModal("statusModal");
+            fetchOrders(currentFilter, currentDeliveryTime);
+            console.log(`✅ Order ${currentOrderForStatus} cancelled with reason: ${reason}`);
+          } catch (error) {
+            console.error("❌ Error updating status:", error);
+            showNotification("Error updating status: " + error.message, true);
+          }
+        };
+      }
+
+      let currentOrderForDelivery = null;
+      function openUpdateDelivery(order_ref_number, currentDelivery) {
+        if (!order_ref_number) {
+          showNotification("Invalid order reference number.", true);
+          return;
+        }
+        currentOrderForDelivery = order_ref_number;
+        document.getElementById("deliveryInput").value = currentDelivery ?? 0;
+        openModal("deliveryModal");
+        console.log(`🔄 Opened delivery update modal for order ${order_ref_number}`);
+      }
+
+      async function submitDeliveryUpdate() {
+        const newDelivery = parseInt(document.getElementById("deliveryInput").value);
+        if (isNaN(newDelivery) || newDelivery < 0) {
+          showNotification("Please enter a valid delivery time.", true);
+          console.log("❌ Invalid delivery time entered");
+          return;
+        }
+        console.log(`🔄 Submitting delivery update for order ${currentOrderForDelivery} to ${newDelivery}`);
+        openModal("delayReasonModal");
+      }
+
+      async function submitDelayReason() {
+        const reasonSelect = document.getElementById("delayReasonSelect").value;
+        const customReason = document.getElementById("customDelayReason").value.trim();
+        const reason = reasonSelect === "custom" ? customReason : reasonSelect;
+        if (!reason) {
+          showNotification("Please select or enter a delay reason.", true);
+          console.log("❌ No delay reason provided");
+          return;
+        }
+        const newDelivery = parseInt(document.getElementById("deliveryInput").value);
+        document.getElementById("confirmDelayReasonText").innerText = reason;
+        closeModal("delayReasonModal");
+        openModal("confirmDelayModal");
+        document.getElementById("confirmDelayButton").onclick = async () => {
+          try {
+            console.log(`🔄 Confirming delivery update for order ${currentOrderForDelivery} to ${newDelivery} with reason: ${reason}`);
+            const res = await fetch(`/api/order/${currentOrderForDelivery}/update-delivery`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ delivery_time: newDelivery, delayReason: reason }),
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            showNotification(`Delivery time updated to ${newDelivery} and message sent.`);
+            closeModal("confirmDelayModal");
+            closeModal("deliveryModal");
+            fetchOrders(currentFilter, currentDeliveryTime);
+            console.log(`✅ Delivery updated for order ${currentOrderForDelivery} to ${newDelivery}`);
+          } catch (error) {
+            console.error("❌ Error updating delivery:", error);
+            showNotification("Error updating delivery: " + error.message, true);
+          }
+        };
+      }
+
+      function openModal(modalId) {
+        document.getElementById(modalId).classList.remove("hidden");
+      }
+      function closeModal(modalId) {
+        document.getElementById(modalId).classList.add("hidden");
+      }
+      window.onclick = function (event) {
+        const modals = document.getElementsByClassName("modal");
+        for (let modal of modals) {
+          if (!modal.classList.contains("hidden") && event.target === modal) {
+            modal.classList.add("hidden");
+          }
+        }
+      };
+
+      function setFilter(filter) {
+        currentFilter = filter;
+        currentDeliveryTime = null;
+        document.getElementById("deliveryFilterInput").value = "";
+        fetchOrders(filter);
+      }
+
+      function setDeliveryFilter() {
+        const deliveryInput = document.getElementById("deliveryFilterInput").value;
+        currentDeliveryTime = deliveryInput ? parseInt(deliveryInput) : null;
+        fetchOrders(currentFilter, currentDeliveryTime);
+      }
+
+      function updateNavbarActive() {
+        const links = document.getElementsByClassName("nav-link");
+        for (let link of links) {
+          if (link.getAttribute("data-filter") === currentFilter) {
+            link.classList.add("bg-blue-600", "text-white", "shadow-sm");
+            link.classList.remove("bg-transparent", "text-gray-300");
+          } else {
+            link.classList.remove("bg-blue-600", "text-white", "shadow-sm");
+            link.classList.add("bg-transparent", "text-gray-300");
+          }
+        }
+      }
+
+      document.addEventListener("DOMContentLoaded", function () {
+        console.log("🔄 Initial fetch of orders on page load");
+        fetchOrders();
+        document.getElementById("search-input").addEventListener("input", function () {
+          filterOrders(this.value);
+        });
+        document.getElementById("deliveryFilterInput").addEventListener("input", setDeliveryFilter);
+      });
+    </script>
+  </head>
+  <body class="bg-gray-50 font-sans">
+    <div
+      id="notification"
+      class="fixed top-4 right-4 text-white px-4 py-2 rounded-lg shadow-md hidden z-50"
+    ></div>
+    <header class="bg-blue-800 text-white shadow-lg sticky top-0 z-40">
+      <div class="container mx-auto px-4 py-3">
+        <div class="flex items-center justify-between">
+          <h1 class="text-xl font-semibold">Orders Portal</h1>
+          <button
+            id="hamburger"
+            class="md:hidden text-gray-300 focus:outline-none"
+            onclick="toggleNavbar()"
+          >
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M4 6h16M4 12h16M4 18h16"
+              ></path>
+            </svg>
+          </button>
+        </div>
+        <div class="mt-4 relative max-w-lg mx-auto">
+          <input
+            id="search-input"
+            type="text"
+            placeholder="Search by Order Ref or Customer Name..."
+            class="w-full p-2 pl-10 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-600 text-gray-700"
+          />
+        </div>
+        <div class="flex items-center justify-between mt-4">
+          <div class="flex items-center space-x-4">
+            <label for="deliveryFilterInput" class="text-sm text-gray-300">Delivery Filter (Days):</label>
+            <input
+              type="number"
+              id="deliveryFilterInput"
+              min="0"
+              class="w-20 p-2 border border-gray-300 rounded-lg text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-600"
+              placeholder="e.g., 2"
+            />
+          </div>
+          <button
+            onclick="exportToCSV()"
+            class="bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm"
+          >
+            Export to CSV
+          </button>
+        </div>
+        <nav class="hidden md:block mt-4">
+          <ul class="flex space-x-3 justify-center">
+            <li>
+              <a
+                href="#"
+                data-filter="all"
+                class="nav-link block py-1 px-3 rounded-lg transition-colors duration-200 hover:bg-blue-600 hover:text-white text-sm"
+                onclick="setFilter('all')"
+                >All Orders</a
+              >
+            </li>
+            <li>
+              <a
+                href="#"
+                data-filter="pending"
+                class="nav-link block py-1 px-3 rounded-lg transition-colors duration-200 hover:bg-blue-600 hover:text-white text-sm"
+                onclick="setFilter('pending')"
+                >Pending Orders</a
+              >
+            </li>
+            <li>
+              <a
+                href="#"
+                data-filter="completed"
+                class="nav-link block py-1 px-3 rounded-lg transition-colors duration-200 hover:bg-blue-600 hover:text-white text-sm"
+                onclick="setFilter('completed')"
+                >Completed Orders</a
+              >
+            </li>
+            <li>
+              <a
+                href="#"
+                data-filter="rejected"
+                class="nav-link block py-1 px-3 rounded-lg transition-colors duration-200 hover:bg-blue-600 hover:text-white text-sm"
+                onclick="setFilter('rejected')"
+                >Rejected Orders</a
+              >
+            </li>
+          </ul>
+        </nav>
+      </div>
+      <nav class="md:hidden bg-blue-900">
+        <ul id="navbar-menu" class="flex flex-col space-y-2 px-4 pb-4 hidden">
+          <li>
+            <a
+              href="#"
+              data-filter="all"
+              class="nav-link block py-1 px-3 rounded-lg transition-colors duration-200 hover:bg-blue-600 hover:text-white text-sm"
+              onclick="setFilter('all'); toggleNavbar()"
+              >All Orders</a
+            >
+          </li>
+          <li>
+            <a
+              href="#"
+              data-filter="pending"
+              class="nav-link block py-1 px-3 rounded-lg transition-colors duration-200 hover:bg-blue-600 hover:text-white text-sm"
+              onclick="setFilter('pending'); toggleNavbar()"
+              >Pending Orders</a
+            >
+          </li>
+          <li>
+            <a
+              href="#"
+              data-filter="completed"
+              class="nav-link block py-1 px-3 rounded-lg transition-colors duration-200 hover:bg-blue-600 hover:text-white text-sm"
+              onclick="setFilter('completed'); toggleNavbar()"
+              >Completed Orders</a
+            >
+          </li>
+          <li>
+            <a
+              href="#"
+              data-filter="rejected"
+              class="nav-link block py-1 px-3 rounded-lg transition-colors duration-200 hover:bg-blue-600 hover:text-white text-sm"
+              onclick="setFilter('rejected'); toggleNavbar()"
+              >Rejected Orders</a
+            >
+          </li>
+        </ul>
+      </nav>
+    </header>
+    <div class="container mx-auto px-4 mt-6">
+      <table class="min-w-full bg-white shadow-lg rounded-lg overflow-hidden">
+        <thead class="bg-gray-200">
+          <tr>
+            <th class="border px-4 py-2 text-left text-sm text-gray-700 font-semibold">Order Ref</th>
+            <th class="border px-4 py-2 text-left text-sm text-gray-700 font-semibold">Customer</th>
+            <th class="border px-4 py-2 text-left text-sm text-gray-700 font-semibold">Total</th>
+            <th class="border px-4 py-2 text-left text-sm text-gray-700 font-semibold">Confirmed</th>
+            <th class="border px-4 py-2 text-left text-sm text-gray-700 font-semibold">Delivery Time (Days)</th>
+            <th class="border px-4 py-2 text-left text-sm text-gray-700 font-semibold">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="orders-tbody"></tbody>
+      </table>
+    </div>
+
+    <div id="detailModal" class="modal fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center hidden">
+      <div class="bg-white p-6 rounded-lg shadow-lg max-w-md w-full">
+        <h2 class="text-lg font-semibold mb-4 text-gray-800">Order Details</h2>
+        <div id="detailContent"></div>
+        <button class="mt-4 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="closeModal('detailModal')">Close</button>
+      </div>
+    </div>
+
+    <div id="noteModal" class="modal fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center hidden">
+      <div class="bg-white p-6 rounded-lg shadow-lg max-w-md w-full">
+        <h2 class="text-lg font-semibold mb-4 text-gray-800">Custom Note</h2>
+        <div id="noteContent"></div>
+        <button class="mt-4 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="closeModal('noteModal')">Close</button>
+      </div>
+    </div>
+
+    <div id="agentFeedbackModal" class="modal fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center hidden">
+      <div class="bg-white p-6 rounded-lg shadow-lg max-w-md w-full">
+        <h2 class="text-lg font-semibold mb-4 text-gray-800">Send Feedback to Customer</h2>
+        <textarea id="agentFeedback" class="w-full p-2 border border-gray-300 rounded-lg text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-600" rows="4" placeholder="Enter your feedback..."></textarea>
+        <div class="mt-4 flex justify-end space-x-2">
+          <button class="bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="closeModal('agentFeedbackModal')">Cancel</button>
+          <button class="bg-gradient-to-r from-yellow-600 to-yellow-700 hover:from-yellow-700 hover:to-yellow-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="submitAgentFeedback()">Send</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="statusModal" class="modal fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center hidden">
+      <div class="bg-white p-6 rounded-lg shadow-lg max-w-md w-full">
+        <h2 class="text-lg font-semibold mb-4 text-gray-800">Update Status</h2>
+        <select id="statusSelect" class="w-full p-2 border border-gray-300 rounded-lg text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-blue-600">
+          <option value="yes">Confirmed</option>
+          <option value="no">Rejected</option>
+        </select>
+        <div class="flex justify-end space-x-2">
+          <button class="bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="closeModal('statusModal')">Cancel</button>
+          <button class="bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="submitStatusUpdate()">Update</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="cancellationReasonModal" class="modal fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center hidden">
+      <div class="bg-white p-6 rounded-lg shadow-lg max-w-md w-full">
+        <h2 class="text-lg font-semibold mb-4 text-gray-800">Cancellation Reason</h2>
+        <select id="cancellationReasonSelect" class="w-full p-2 border border-gray-300 rounded-lg text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-blue-600">
+          <option value="Customer Request">Customer Request</option>
+          <option value="Out of Stock">Out of Stock</option>
+          <option value="Payment Issue">Payment Issue</option>
+          <option value="custom">Other (Specify)</option>
+        </select>
+        <input id="customCancellationReason" type="text" class="w-full p-2 border border-gray-300 rounded-lg text-sm mb-4 hidden focus:outline-none focus:ring-2 focus:ring-blue-600" placeholder="Specify reason..." />
+        <div class="flex justify-end space-x-2">
+          <button class="bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="closeModal('cancellationReasonModal')">Cancel</button>
+          <button class="bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="submitCancellationReason()">Submit</button>
+        </div>
+        <script>
+          document.getElementById("cancellationReasonSelect").addEventListener("change", function () {
+            const customInput = document.getElementById("customCancellationReason");
+            customInput.classList.toggle("hidden", this.value !== "custom");
+            if (this.value !== "custom") customInput.value = "";
+          });
+        </script>
+      </div>
+    </div>
+
+    <div id="confirmCancellationModal" class="modal fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center hidden">
+      <div class="bg-white p-6 rounded-lg shadow-lg max-w-md w-full">
+        <h2 class="text-lg font-semibold mb-4 text-gray-800">Confirm Cancellation</h2>
+        <p class="text-sm text-gray-700">
+          Are you sure you want to cancel this order? The following message will be sent to the customer:
+          <span id="confirmCancellationReasonText" class="block mt-2 font-semibold text-red-600 text-sm"></span>
+        </p>
+        <div class="flex justify-end space-x-2 mt-4">
+          <button class="bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="closeModal('confirmCancellationModal')">Cancel</button>
+          <button id="confirmCancellationButton" class="bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm">Confirm</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="deliveryModal" class="modal fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center hidden">
+      <div class="bg-white p-6 rounded-lg shadow-lg max-w-md w-full">
+        <h2 class="text-lg font-semibold mb-4 text-gray-700">Update Delivery Time</h2>
+        <input id="deliveryInput" type="number" min="0" class="w-full p-2 border border-gray-300 rounded-lg text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-blue-600" placeholder="Enter delivery time (days)" />
+        <div class="flex justify-end space-x-2">
+          <button class="bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="closeModal('deliveryModal')">Cancel</button>
+          <button class="bg-gradient-to-r from-yellow-600 to-yellow-700 hover:from-yellow-700 hover:to-yellow-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="submitDeliveryUpdate()">Update</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="delayReasonModal" class="modal fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center hidden">
+      <div class="bg-white p-6 rounded-lg shadow-lg max-w-md w-full">
+        <h2 class="text-lg font-semibold mb-4 text-gray-700">Delay Reason</h2>
+        <select id="delayReasonSelect" class="w-full p-2 border border-gray-300 rounded-lg text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-blue-600">
+          <option value="Logistics Delay">Logistics Delay</option>
+          <option value="Inventory Issue">Inventory Issue</option>
+          <option value="Weather Conditions">Weather Conditions</option>
+          <option value="custom">Other (Specify)</option>
+        </select>
+        <input id="customDelayReason" type="text" class="w-full p-2 border border-gray-300 rounded-lg text-sm mb-4 hidden focus:outline-none focus:ring-2 focus:ring-blue-600" placeholder="Specify reason..." />
+        <div class="flex justify-end space-x-2">
+          <button class="bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="closeModal('delayReasonModal')">Cancel</button>
+          <button class="bg-gradient-to-r from-yellow-600 to-yellow-700 hover:from-yellow-700 hover:to-yellow-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="submitDelayReason()">Submit</button>
+        </div>
+        <script>
+          document.getElementById("delayReasonSelect").addEventListener("change", function () {
+            const customInput = document.getElementById("customDelayReason");
+            customInput.classList.toggle("hidden", this.value !== "custom");
+            if (this.value !== "custom") customInput.value = "";
+          });
+        </script>
+      </div>
+    </div>
+
+    <div id="confirmDelayModal" class="modal fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center hidden">
+      <div class="bg-white p-6 rounded-lg shadow-lg max-w-md w-full">
+        <h2 class="text-lg font-semibold mb-4 text-gray-700">Confirm Delivery Update</h2>
+        <p class="text-sm text-gray-700">
+          The following message will be sent to the customer:
+          <span id="confirmDelayReasonText" class="block mt-2 font-semibold text-yellow-600 text-sm"></span>
+        </p>
+        <div class="flex justify-end space-x-2 mt-4">
+          <button class="bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm" onclick="closeModal('confirmDelayModal')">Cancel</button>
+          <button id="confirmDelayButton" class="bg-gradient-to-r from-yellow-600 to-yellow-700 hover:from-yellow-700 hover:to-yellow-800 text-white px-4 py-2 rounded-lg text-sm font-medium transition duration-200 shadow-sm">Confirm</button>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
